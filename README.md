@@ -16,8 +16,6 @@ Play **Heavy Rain (PC)** in VR. Every frame is drawn in true 3D for each eye wit
 - **VR settings:** pause the game or open the game's Options menu, and a panel appears on the right. Point a controller and pull its trigger.
 - **Menus:** tap all **four face buttons** for the pause screen (with the VR settings panel).
 - **Xbox or PlayStation (PS VR2) controls**, with matching button icons in the game (VR settings panel). With PlayStation controls, the moves the game asks you to make with the controller are read from your right VR controller.
-- **Menus, prompts and subtitles** float on a screen in front of you.
-- **Camera closer (third person):** the game's camera moves up to 5 m closer to the character (2 m by default), so you aren't watching from the far end of the room. Set it in the VR settings panel.
 - **Rumble.** The game's controller vibration plays on your VR controllers.
 - **3D audio:** sounds follow your head.
 
