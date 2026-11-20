@@ -29,7 +29,6 @@ Play **Heavy Rain (PC)** in VR. Every frame is drawn in true 3D for each eye wit
 - **Finger detection.** Rest your fingers on the controller and the character's fingers follow: lift your index finger to point, lift your thumb for a thumbs-up, squeeze for a fist.
 - **Your body follows your headset:** lean or take a step and the body moves with you, so your hands always reach.
 - **Prompts in front of you:** action prompts, hold and mash prompts, tutorial texts, thoughts and dialogue choices appear in front of you instead of around the character.
-- **Mirrors show your head.**
 - **In the VR settings panel:** smooth or snap turning (and its speed / angle); motion controls on or off (off: the controllers work like a gamepad); hide head on or off (on: the character's head, hair, eyes and teeth are not drawn in first person).
 
 ## Install
@@ -47,21 +46,8 @@ VR turns on by itself as soon as the game starts, and SteamVR starts with it. Us
 |---|---|
 | **○ (PS VR2) / B (Meta Quest, Index) next to your head** | First person on / off - press it while walking for gameplay, during a cutscene for cutscenes |
 | **Tap all four face buttons** | Pause screen with the VR settings panel |
-| **Trigger while pointing at the VR settings panel** | Click the panel |
-| **Left grip held + left stick** | D-pad |
-| **Left grip held + menu button** | Back / Share |
 
 The sticks, face buttons and triggers work like a gamepad's; the grips are the bumpers (L1 / R1).
-
-**Keyboard** (with the game window in front)
-
-| Key | What it does |
-|---|---|
-| **F9** | VR on / off |
-| **F2** | Recenter the view |
-| **F1** / **F3** | First person while walking / in cutscenes on / off |
-| **F10** / **F11** | Xbox / PlayStation button icons |
-| **F5** / **F6** | Tilt the character's hands up / down (5° a press, saved for your headset) |
 
 ## Uninstall
 
@@ -76,7 +62,6 @@ Open an issue on the mod's GitHub page (**Issues** → **New issue**) with a few
 | **The game crashed** | The newest **`crash_<date>.txt`** from **`hrvr_logs\crash_reports`** in your game folder |
 | **Something looks or works wrong, the game froze, or VR did not start** | **`hrvr_logs\hrvr.log`** from your game folder, right after quitting the game (if you have started the game again since, send **`hrvr.prev.log`** too) |
 | **The install or uninstall window showed an error** | A screenshot of that window |
-| **The bug happens at a certain place in the game** | The name of the chapter (crash reports already include it) |
 
 The mod writes these files itself while the game runs (`hrvr.log` is started fresh each time; the run before is kept as `hrvr.prev.log`).
 
