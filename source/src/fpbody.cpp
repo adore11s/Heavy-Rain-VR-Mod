@@ -1310,6 +1310,39 @@ ParentMatrixFn g_origParent = nullptr;
 std::atomic<bool> g_items{true};
 std::atomic<uint64_t> g_itemAnswers{0}, g_itemByHand{0}, g_itemBody{0}, g_propPalettes{0};
 std::atomic<uint64_t> g_itemHandBone{0}, g_itemOtherBone{0};  // 0.30.1 census (playbook 19.8, revision 16)
+std::atomic<uint64_t> g_handRuleHolds{0};  // 1.0.5: hand-rule answers that set the holding signal (L3)
+
+// 1.0.5 (playbook 19.8 point 11 L1): "a run-time census line counts any object the engine links to a hand whose draw
+// the carry did not reach". Every node ParentMatrix is asked about is noted here (lossy, 4-way buckets, last time
+// seen); the census then checks the objects of the movies playing with the player that are within reach of a wrist.
+// A linked object near a hand that never came through the hook cannot be carried by any route of this mod.
+constexpr size_t kAskedSlots = 4096;
+std::atomic<void*> g_askedNode[kAskedSlots];
+std::atomic<uint64_t> g_askedMs[kAskedSlots];
+size_t AskedBucket(const void* node) {
+    const uint64_t h = (reinterpret_cast<uintptr_t>(node) >> 4) * 0x9E3779B97F4A7C15ull;
+    return size_t(h >> 52) & (kAskedSlots - 4);  // first slot of a 4-slot bucket
+}
+void NoteAsked(void* node, uint64_t now) {
+    const size_t b = AskedBucket(node);
+    size_t oldest = b;
+    for (size_t i = b; i < b + 4; ++i) {
+        if (g_askedNode[i].load(std::memory_order_relaxed) == node) {
+            g_askedMs[i].store(now, std::memory_order_relaxed);
+            return;
+        }
+        if (g_askedMs[i].load(std::memory_order_relaxed) < g_askedMs[oldest].load(std::memory_order_relaxed)) oldest = i;
+    }
+    g_askedNode[oldest].store(node, std::memory_order_relaxed);
+    g_askedMs[oldest].store(now, std::memory_order_relaxed);
+}
+bool AskedSince(const void* node, uint64_t since) {
+    const size_t b = AskedBucket(node);
+    for (size_t i = b; i < b + 4; ++i)
+        if (g_askedNode[i].load(std::memory_order_relaxed) == node && g_askedMs[i].load(std::memory_order_relaxed) >= since)
+            return true;
+    return false;
+}
 constexpr size_t kNodeLocal = 0x50, kNodeWorld = 0x90, kNodeSkeleton = 0x160;
 
 bool SameMatrix(const Mat4& a, const Mat4& b) {
@@ -1524,7 +1557,7 @@ void LogItem(void* node, int bone, int hand, float dist) {
 std::atomic<bool> g_looseItems{true}, g_looseOn{false};
 std::atomic<int> g_looseLive{0};
 std::atomic<uint64_t> g_looseAnswers{0}, g_looseCarried{0}, g_looseLetGo{0}, g_looseSeeded{0}, g_looseInherit{0},
-    g_looseOffClass{0}, g_looseHandHolds{0};
+    g_looseOffClass{0}, g_looseHandHolds{0}, g_looseModelBones{0};
 struct LooseNode {
     void* node = nullptr;
     const float* world = nullptr;  // node + 0x90: what ParentMatrix returns for the node's children
@@ -1536,6 +1569,13 @@ struct LooseNode {
     float driftCm = 0.f, driftDeg = 0.f, driftWeight = 0.f;  // largest in the current 10 s (Gate 3 row 8)
     int driftHand = -1;
     char entity[64] = {};
+    // Owner 2026-11-20 "Only the held part" (movie_item.h Ride / PartMotion; Gate 2 replays the same): a node below a
+    // tracked node is a PART of that object with a slot of its own.
+    Mat4 anim{};               // where the animation has this node now (its children's animated parent world)
+    float eff[2] = {0.f, 0.f};  // the weights it is drawn with (own, or riding its parent: Ride)
+    bool linked = false, part = false;
+    int cls = 0;
+    movieitem::PartMotion motion;  // a part: its local against its parent moved within 1 s = linked on its own
 };
 struct InHand {
     void* node = nullptr;
@@ -1543,8 +1583,10 @@ struct InHand {
     int hand = -1;
 };
 std::mutex g_looseMutex;
-LooseNode g_loose[32];
-std::atomic<void*> g_looseIds[32];  // g_loose[i].node, readable without the lock (a far node without a slot skips it)
+constexpr int kLooseSlots = 64;  // 1.0.3: parts have slots too (the 1301 kitchen group has 16 nodes)
+LooseNode g_loose[kLooseSlots];
+std::atomic<void*> g_looseIds[kLooseSlots];    // g_loose[i].node, readable without the lock (a far node without a slot skips it)
+std::atomic<const float*> g_looseWorlds[kLooseSlots];  // g_loose[i].world: a node whose parent world this is = a part
 InHand g_inHand[16];
 
 bool LooseTracked(void* node) {
@@ -1555,13 +1597,14 @@ bool LooseTracked(void* node) {
 void LooseClear(int i) {  // g_looseMutex held
     g_loose[i] = LooseNode{};
     g_looseIds[i].store(nullptr, std::memory_order_relaxed);
+    g_looseWorlds[i].store(nullptr, std::memory_order_relaxed);
     g_looseLive.fetch_sub(1, std::memory_order_relaxed);
 }
 
 void NoteInHand(void* node, int hand) {  // the bone path answered it on (or below) that hand bone
     const uint64_t now = GetTickCount64();
     std::lock_guard lock(g_looseMutex);
-    for (int i = 0; i < 32; ++i)  // in the socket now: a put-back after this starts a fresh, seeded slot
+    for (int i = 0; i < kLooseSlots; ++i)  // in the socket now: a put-back after this starts a fresh, seeded slot
         if (g_loose[i].node == node) LooseClear(i);
     InHand* slot = nullptr;
     for (auto& h : g_inHand)
@@ -1582,7 +1625,32 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
     if (!obj::Bytes(node, kNodeLocal, local.m, sizeof(local.m)) || !Finite(local.m) ||
         !obj::Bytes(r, 0, par.m, sizeof(par.m)) || !Finite(par.m))
         return r;
-    const Mat4 world = pose::Mul(local, par);  // where the animation has the object
+    // Owner 2026-11-20 "Only the held part": r is the world of a node this route tracks -> this node is a PART of that
+    // object. Its animated place comes from the parent's ANIMATED world (r is the parent's drawn world while carried).
+    struct Up {
+        bool found = false;
+        Mat4 anim{};
+        float eff[2] = {0.f, 0.f};
+        bool linked = false;
+        int cls = -1;
+        char entity[64] = {};
+    } up;
+    for (auto& w : g_looseWorlds)
+        if (w.load(std::memory_order_relaxed) == r) up.found = true;
+    if (up.found) {
+        std::lock_guard lock(g_looseMutex);
+        up.found = false;
+        for (auto& q : g_loose)
+            if (q.node && q.world == r) {
+                up.found = true;
+                up.eff[0] = q.eff[0], up.eff[1] = q.eff[1];
+                up.anim = up.eff[0] > 0.f || up.eff[1] > 0.f ? q.anim : par;  // not carried: r is its animated world
+                up.linked = q.linked;
+                up.cls = q.cls;
+                std::memcpy(up.entity, q.entity, sizeof(up.entity));
+            }
+    }
+    const Mat4 world = pose::Mul(local, up.found ? up.anim : par);  // where the animation has the object
     const Vec3 at = Pos(world);
     bool nearWrist = false;
     for (int s = 0; s < 2 && !nearWrist; ++s) {
@@ -1596,9 +1664,18 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
     // The engine's link (Gate 3 row 9): a movie playing this object with the player, and its class.
     movielink::Link link;
     const void* parentNode = reinterpret_cast<const uint8_t*>(r) - kNodeWorld;  // r = the parent node's world (bone -1)
-    const bool inMovie = movielink::Find(node, parentNode, g_node.load(std::memory_order_relaxed), &link);
-    const bool linked = inMovie && (link.cls == itemclass::kHeld || link.cls == itemclass::kNotKnown);
-    if (inMovie && !linked) g_looseOffClass.fetch_add(1, std::memory_order_relaxed);
+    bool inMovie = false;
+    if (up.found) {  // a part: the object's link and class (its parent's)
+        inMovie = up.cls >= 0;
+        link.cls = up.cls;
+        std::memcpy(link.entity, up.entity, sizeof(link.entity));
+    } else {
+        inMovie = movielink::Find(node, parentNode, g_node.load(std::memory_order_relaxed), &link);
+    }
+    const bool linked = up.found ? up.linked
+                                 : inMovie && (link.cls == itemclass::kHeld || link.cls == itemclass::kArm ||
+                                               link.cls == itemclass::kNotKnown);
+    if (inMovie && !linked && !up.found) g_looseOffClass.fetch_add(1, std::memory_order_relaxed);
     if (!linked && !tracked) return r;  // a tracked one is fed link = false below, so it lets go within the ramp
     const uint64_t now = GetTickCount64();
     LARGE_INTEGER qpc, freq;
@@ -1609,16 +1686,12 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
     {
         std::lock_guard lock(g_looseMutex);
         LooseNode* slot = nullptr;
-        for (int i = 0; i < 32; ++i) {
+        for (int i = 0; i < kLooseSlots; ++i) {
             LooseNode& q = g_loose[i];
             if (!q.node) continue;
             if (now - q.ms > 3000) {  // not seen for 3 s: the object is gone or far from the hands
                 LooseClear(i);
                 continue;
-            }
-            if (q.world == r) {  // below a node this route tracks: it inherits that node's answer
-                if (q.item.Held()) g_looseInherit.fetch_add(1, std::memory_order_relaxed);
-                return r;
             }
             if (q.node == node) slot = &q;
         }
@@ -1626,13 +1699,24 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
             if (!linked) return r;
             void* sk = obj::Ptr(node, kNodeSkeleton);
             uint32_t bones = 0;
-            if (sk && obj::Get(sk, 0, bones) && bones > 8) return r;  // a character, never an item
-            for (int i = 0; i < 32 && !slot; ++i)
+            // A character, never an item - unless the class table names it a held item: skinned props have up to 106
+            // bones (HR_PROP_MEAT; MADBAG 9, ROPE 23, ETHANCOAT02 42) and passers-by start at 50, so the count alone
+            // cannot tell (playbook r37 L2, docs/items/L2.md; 0.33.0 kept every prop over 8 bones out of the hand).
+            if (sk && obj::Get(sk, 0, bones) && bones > 8 && link.cls != itemclass::kHeld &&
+                link.cls != itemclass::kArm)
+                return r;
+            // 1.0.4: and never a skeleton of a character's size, whatever the table says - the largest object rig is 108
+            // bones (HR_ETHANCOATCLOTH; held props up to 106, HR_PROP_MEAT), character rigs start at 179 (3801 Mad Jack:
+            // 180, was in the table as "held" because his rig is in no rig list).
+            if (sk && bones > 110) return r;
+            for (int i = 0; i < kLooseSlots && !slot; ++i)
                 if (!g_loose[i].node) {
                     slot = &g_loose[i];
                     g_looseIds[i].store(node, std::memory_order_relaxed);
+                    g_looseWorlds[i].store(reinterpret_cast<const float*>(static_cast<const uint8_t*>(node) + kNodeWorld),
+                                           std::memory_order_relaxed);
                 }
-            if (!slot) return r;  // 32 objects near the hands at once: the rest stay as animated
+            if (!slot) return r;  // 64 nodes near the hands at once: the rest stay as animated (a part rides its parent)
             *slot = LooseNode{};
             slot->node = node;
             slot->world = reinterpret_cast<const float*>(static_cast<const uint8_t*>(node) + kNodeWorld);
@@ -1646,10 +1730,19 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
                 }
         }
         if (inMovie) std::snprintf(slot->entity, sizeof(slot->entity), "%s", link.entity);
-        if (inMovie && !linked && !slot->classLogged) slot->classLogged = logClass = true;
+        if (inMovie && !linked && !slot->classLogged && !up.found) slot->classLogged = logClass = true;
         slot->ms = now;
+        slot->anim = world;
+        slot->linked = linked;
+        slot->cls = link.cls;
+        slot->part = up.found;
+        if (up.found) slot->motion.Feed(local.m, now);
+        if (up.found)
+            movieitem::Ride(slot->item.wt, up.eff, slot->eff);
+        else
+            slot->eff[0] = slot->item.wt[0], slot->eff[1] = slot->item.wt[1];
         sample = !slot->at.QuadPart || (qpc.QuadPart - slot->at.QuadPart) * 30 >= freq.QuadPart;
-        if (!sample && !slot->item.Held()) return r;
+        if (!sample && !(slot->eff[0] > 0.f || slot->eff[1] > 0.f)) return r;
     }
     if (seeded) {
         g_looseSeeded.fetch_add(1, std::memory_order_relaxed);
@@ -1669,7 +1762,33 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
             drawn[s] = p->drawn + size_t(p->view.hand[s]) * 16;
         }
     const float* head = p->view.head >= 0 ? p->clean + size_t(p->view.head) * 16 : nullptr;
+    // Playbook r37 L2: the object's model bones, never only its root. Point 0 = where the animation has the node now;
+    // a skinned prop adds its skeleton's bone positions (instance +0x10, world space - the buffer the palette and
+    // RootEditOf use; from the last skeleton update, so up to one frame old).
+    constexpr uint32_t kMaxPropBones = 128;
+    alignas(16) static thread_local float pts[(kMaxPropBones + 1) * 3];
+    alignas(16) static thread_local float propWorlds[kMaxPropBones * 16];
+    int npts = 1;
+    if (sample) {
+        pts[0] = at.x, pts[1] = at.y, pts[2] = at.z;
+        void* sk = obj::Ptr(node, kNodeSkeleton);
+        uint32_t nb = 0;
+        const void* wb = sk ? obj::Ptr(sk, kSkelWorlds) : nullptr;
+        if (wb && obj::Get(sk, 0, nb) && nb >= 2 && nb <= kMaxPropBones &&
+            obj::Bytes(wb, 0, propWorlds, size_t(nb) * 16 * sizeof(float)))
+            for (uint32_t i = 0; i < nb; ++i) {
+                const float* q = propWorlds + size_t(i) * 16 + 12;
+                if (!std::isfinite(q[0]) || !std::isfinite(q[1]) || !std::isfinite(q[2])) {
+                    npts = 1;  // a torn buffer: the root alone
+                    break;
+                }
+                pts[npts * 3] = q[0], pts[npts * 3 + 1] = q[1], pts[npts * 3 + 2] = q[2];
+                ++npts;
+            }
+        if (npts > 1) g_looseModelBones.fetch_add(1, std::memory_order_relaxed);
+    }
     movieitem::State item;
+    float eff[2] = {0.f, 0.f};
     bool changed = false, heldNow = false;
     {
         std::lock_guard lock(g_looseMutex);
@@ -1678,13 +1797,26 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
             if (q.node == node) slot = &q;
         if (!slot) return r;
         if (sample) {
-            slot->item.Sample(linked, world.m, clean, head);
+            // the animated elbows, for an ARM-class object only: it can hang on a forearm and then stays there (owner
+            // "Stay with the arm", 3003 bag; a per-frame forearm test on every object opened 8 .. 41 Gate 2 pairs)
+            const float* fore[2] = {nullptr, nullptr};
+            const bool armClass = inMovie && link.cls == itemclass::kArm;
+            for (int s = 0; s < 2 && armClass; ++s)
+                if (p->view.fore[s] >= 0 && clean[s]) fore[s] = p->clean + size_t(p->view.fore[s]) * 16;
+            // a part is linked on its own only while it moves against its parent (it rides its parent otherwise)
+            const bool feed = up.found ? linked && slot->motion.Free(now) : linked;
+            slot->item.SamplePoints(feed, pts, npts, clean, head, armClass ? fore : nullptr);
             slot->at = qpc;
             heldNow = slot->item.Held();
             changed = heldNow != slot->held;
             slot->held = heldNow;
         }
         item = slot->item;
+        if (up.found)
+            movieitem::Ride(item.wt, up.eff, slot->eff);
+        else
+            slot->eff[0] = item.wt[0], slot->eff[1] = item.wt[1];
+        eff[0] = slot->eff[0], eff[1] = slot->eff[1];
     }
     if (changed) {
         (heldNow ? g_looseCarried : g_looseLetGo).fetch_add(1, std::memory_order_relaxed);
@@ -1693,9 +1825,11 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
             Log("FPITEM node %p \"%s\" (movie link): %s", node, link.entity,
                 heldNow ? "moves with a wrist - drawn in that controller hand" : "let go - drawn where its clip has it");
     }
-    if (!item.Held()) return r;
+    if (!(eff[0] > 0.f || eff[1] > 0.f)) return r;
+    if (up.found && !item.Held()) g_looseInherit.fetch_add(1, std::memory_order_relaxed);  // a part riding its parent
     Mat4 drawnWorld, invLocal;
-    if (!item.Draw(world.m, clean, drawn, drawnWorld.m) || !Finite(drawnWorld.m) || !AffineInverse(local, &invLocal)) return r;
+    rigmap::BlendCarry(world.m, clean, drawn, eff, drawnWorld.m);
+    if (!Finite(drawnWorld.m) || !AffineInverse(local, &invLocal)) return r;
     const Mat4 answer = pose::Mul(invLocal, drawnWorld);  // local x answer = the drawn world
     if (!Finite(answer.m) || SameMatrix(answer, par)) return r;
     // Gate 3 row 3: the hand that holds it plays the animation's fingers (fingers off while < 500 ms old).
@@ -1708,7 +1842,7 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
                     s ? "right" : "left", node, link.entity);
         }
     // Gate 3 row 8: its place in the drawn hand against its place in the animated hand (0 at full weight).
-    const int h = item.wt[1] > item.wt[0] ? 1 : 0;
+    const int h = eff[1] > eff[0] ? 1 : 0;
     if (clean[h] && drawn[h]) {
         float cm = 0.f, deg = 0.f;
         movieitem::Drift(world.m, drawnWorld.m, clean[h], drawn[h], &cm, &deg);
@@ -1717,11 +1851,11 @@ const float* LooseAnswer(void* node, const float* r, void* skeleton, const float
             if (q.node == node) {
                 q.driftCm = std::fmax(q.driftCm, cm);
                 q.driftDeg = std::fmax(q.driftDeg, deg);
-                q.driftWeight = std::fmax(q.driftWeight, item.wt[h]);
+                q.driftWeight = std::fmax(q.driftWeight, eff[h]);
                 q.driftHand = h;
             }
     }
-    if (item.wt[h] >= 0.999f && clean[h])
+    if (eff[h] >= 0.999f && clean[h])
         NoteHandCarry(fp::Len(fp::Sub(at, Vec3{clean[h][12], clean[h][13], clean[h][14]})), 1.f);
     g_looseAnswers.fetch_add(1, std::memory_order_relaxed);
     alignas(16) static thread_local float out[16];
@@ -1784,7 +1918,7 @@ bool HandNodeIsItem(void* node, void* skeleton, int side, int bone, float out) {
     if (!accessory) return true;
     movielink::Link link;
     const bool held = movielink::Find(node, nullptr, g_node.load(std::memory_order_relaxed), &link) &&
-                      (link.cls == itemclass::kHeld || link.cls == itemclass::kNotKnown);
+                      (link.cls == itemclass::kHeld || link.cls == itemclass::kArm || link.cls == itemclass::kNotKnown);
     if (fresh) {
         g_handAccessories.fetch_add(1, std::memory_order_relaxed);
         Log("FPFINGER the %s hand has node %p on it since the character appeared (bone %d, %.1f cm out): %s", side ? "right" : "left",
@@ -1892,6 +2026,14 @@ const float* ItemAnswer(void* node, const float* r) {
     if (byHand >= 0) {
         g_itemByHand.fetch_add(1, std::memory_order_relaxed);
         NoteHandCarry(byDist, rigmap::HandCarryWeight(byDist));
+        // 1.0.5 (playbook 19.8 point 11 L3, one holding signal on EVERY route): the hand rule carries this object in
+        // that controller hand, so that hand holds - its fingers play the animation (until 1.0.4 only the bone route
+        // and the movie route said so, the Detroit dishes' fault (2)).
+        const uint64_t t = GetTickCount64();
+        g_handRuleHolds.fetch_add(1, std::memory_order_relaxed);
+        if (t - g_handItemMs[byHand].exchange(t) > 5000)
+            Log("FPFINGER the %s hand holds node %p (hand rule, %.1f cm from the wrist): its fingers play the animation",
+                byHand ? "right" : "left", node, 100.f * byDist);
     }
     if (bone < 0) g_itemBody.fetch_add(1, std::memory_order_relaxed);
     else if (byHand < 0) {  // 19.8 census: on a hand bone (or below one) versus any other body bone
@@ -2026,6 +2168,7 @@ bool ItemCandidate(void* node, const float* r) {
 const float* HookParentMatrix(void* node) {
     const float* r = g_origParent(node);
     if (!r || !g_items.load(std::memory_order_relaxed) || !g_active.load(std::memory_order_relaxed)) return r;
+    NoteAsked(node, GetTickCount64());  // 1.0.5 L1 census: this node's world comes through the hook
     const itemseam::Caller who = CallerOf(_ReturnAddress());
     switch (g_seam.RouteOf(who)) {
     case itemseam::Route::Game:
@@ -2560,6 +2703,60 @@ bool Install() {
     return g_installed;
 }
 
+// 1.0.5 L1 census sample (every 500 ms while the controllers drive the arms): the objects of the movies playing with
+// the player that the class table would let a hand take (held, arm, not in the table), within 35 cm (Gate 2's keep
+// reach) of a wrist - did ParentMatrix see each of them in the last second? One that it did not is linked to a hand
+// but drawn on a path no route of the mod reaches (named once in the log).
+uint64_t g_linkNear = 0, g_linkReached = 0, g_linkMissed = 0;
+void SampleLinked(const Plan& plan, uint64_t now) {
+    static uint64_t lastMs = 0;
+    if (!plan.active || !plan.arms || !plan.node || !plan.skeleton || now - lastMs < 500) return;
+    lastMs = now;
+    const float* base = static_cast<const float*>(obj::Ptr(plan.skeleton, kSkelWorlds));
+    uint32_t count = 0;
+    if (!base || !obj::Get(plan.skeleton, 0, count) || count == 0 || count > uint32_t(kMaxBones)) return;
+    Vec3 wrist[2];
+    bool have[2] = {false, false};
+    for (int s = 0; s < 2; ++s) {
+        const int h = g_handIdx[s].load(std::memory_order_relaxed);
+        float w[3];
+        if (h >= 0 && uint32_t(h) < count && obj::Bytes(base + size_t(h) * 16 + 12, 0, w, sizeof(w))) {
+            wrist[s] = {w[0], w[1], w[2]};
+            have[s] = true;
+        }
+    }
+    if (!have[0] && !have[1]) return;
+    movielink::LinkedObject objs[32];
+    const int n = movielink::ListLinked(plan.node, objs, 32);
+    static void* logged[16] = {};
+    static int nextLog = 0;
+    for (int i = 0; i < n; ++i) {
+        const int cls = objs[i].cls;
+        if (!(cls == itemclass::kHeld || cls == itemclass::kArm || cls == itemclass::kNotKnown)) continue;
+        Mat4 world;
+        if (!obj::Bytes(objs[i].node, kNodeWorld, world.m, sizeof(world.m)) || !Finite(world.m)) continue;
+        float best = 1e9f;
+        for (int s = 0; s < 2; ++s)
+            if (have[s]) best = std::fmin(best, fp::Len(fp::Sub(Pos(world), wrist[s])));
+        if (best > 0.35f) continue;
+        ++g_linkNear;
+        if (AskedSince(objs[i].node, now > 1000 ? now - 1000 : 0)) {
+            ++g_linkReached;
+            continue;
+        }
+        ++g_linkMissed;
+        bool seen = false;
+        for (void* q : logged) seen = seen || q == objs[i].node;
+        if (!seen) {
+            logged[nextLog] = objs[i].node;
+            nextLog = (nextLog + 1) % 16;
+            Log("FPITEM linked object NOT reached: node %p \"%s\" (%s) plays with the player %.1f cm from a wrist, but "
+                "ParentMatrix never asked for it - no route of the mod can carry it (playbook 19.8 point 11 L1)",
+                objs[i].node, objs[i].entity, itemclass::Name(cls), 100.f * best);
+        }
+    }
+}
+
 void Publish(const Plan& plan) {
     {
         static uint64_t seq = 0;
@@ -2576,8 +2773,16 @@ void Publish(const Plan& plan) {
     // answers / palettes each route gave. A route at 0 while an item is visibly left behind is the route it really uses.
     static uint64_t last = 0, prev[8] = {};
     const uint64_t now = GetTickCount64();
+    SampleLinked(plan, now);
     if (!plan.active || now - last < 10000) return;
     last = now;
+    if (g_linkNear) {
+        Log("FPITEM linked 10 s (L1): %llu samples of a movie-linked object within 35 cm of a wrist - %llu reached by "
+            "ParentMatrix, %llu NOT reached; hand-rule holding signals %llu",
+            (unsigned long long)g_linkNear, (unsigned long long)g_linkReached, (unsigned long long)g_linkMissed,
+            (unsigned long long)g_handRuleHolds.exchange(0));
+        g_linkNear = g_linkReached = g_linkMissed = 0;
+    }
     const uint64_t cur[8] = {g_itemHandBone.load(), g_itemOtherBone.load(), g_itemBody.load(), g_itemByHand.load(),
                              g_propPalettes.load(), g_partnerPalettes.load(), g_fingerHeld.load(), g_looseAnswers.load()};
     uint64_t d[8], any = 0;
@@ -2613,11 +2818,11 @@ void Publish(const Plan& plan) {
             (unsigned long long)sd[6], (unsigned long long)sd[7]);
     // 0.33.0 (Gate 3 rows 3 / 8 / 9): the movie route - how many answers, objects kept off the hand by their class, the
     // hands told they hold one, and one drift line per held object.
-    static uint64_t mPrev[5] = {};
-    const uint64_t mCur[5] = {g_looseAnswers.load(), g_looseOffClass.load(), g_looseHandHolds.load(), g_looseSeeded.load(),
-                              g_rootPalettes.load()};
-    uint64_t md[5], mAny = 0;
-    for (int i = 0; i < 5; ++i) {
+    static uint64_t mPrev[6] = {};
+    const uint64_t mCur[6] = {g_looseAnswers.load(), g_looseOffClass.load(), g_looseHandHolds.load(), g_looseSeeded.load(),
+                              g_rootPalettes.load(), g_looseModelBones.load()};
+    uint64_t md[6], mAny = 0;
+    for (int i = 0; i < 6; ++i) {
         md[i] = mCur[i] - mPrev[i];
         mAny += md[i];
         mPrev[i] = mCur[i];
@@ -2625,9 +2830,9 @@ void Publish(const Plan& plan) {
     if (mAny)
         Log("FPITEM movie route 10 s: drawn in a controller hand %llu, kept where the game puts them by their class %llu, "
             "hand-holding signals %llu, started in the hand from the socket %llu, skinned objects drawn from an edited "
-            "root %llu (%d objects tracked)",
+            "root %llu, samples with model bones (L2) %llu (%d objects tracked)",
             (unsigned long long)md[0], (unsigned long long)md[1], (unsigned long long)md[2], (unsigned long long)md[3],
-            (unsigned long long)md[4], g_looseLive.load());
+            (unsigned long long)md[4], (unsigned long long)md[5], g_looseLive.load());
     LogDrift();
 }
 
@@ -2708,7 +2913,7 @@ void LogStatus() {
     Log("FPITEM hand rule votes (0.30.0, Hips / body node only): %llu decided carried, %llu decided worn",
         static_cast<unsigned long long>(g_heldVotes.load()), static_cast<unsigned long long>(g_wornVotes.load()));
     Log("FPITEM movie route (0.33.0, fp_items_loose=%d): %llu answers in a controller hand, %llu decided carried, %llu let "
-        "go, %llu started from the hand socket, %llu children inherited; %d object(s) near the hands now",
+        "go, %llu started from the hand socket, %llu answers of a part riding its carried parent (1.0.3 parts); %d node(s) near the hands now",
         int(g_looseItems.load()), static_cast<unsigned long long>(g_looseAnswers.load()),
         static_cast<unsigned long long>(g_looseCarried.load()), static_cast<unsigned long long>(g_looseLetGo.load()),
         static_cast<unsigned long long>(g_looseSeeded.load()), static_cast<unsigned long long>(g_looseInherit.load()),

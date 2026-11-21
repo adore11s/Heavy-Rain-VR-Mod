@@ -123,6 +123,12 @@ target_include_directories(haptics_tests PRIVATE src)
 target_compile_options(haptics_tests PRIVATE /W4 /permissive-)
 add_test(NAME haptics_tests COMMAND haptics_tests)
 
+# 1.0.1: XR swapchain colour format (washed-out double gamma on runtimes without RGBA sRGB).
+add_executable(swap_format_tests tests/swap_format_tests.cpp)
+target_include_directories(swap_format_tests PRIVATE src)
+target_compile_options(swap_format_tests PRIVATE /W4 /permissive-)
+add_test(NAME swap_format_tests COMMAND swap_format_tests)
+
 # 0.34.0: the other-build search on the analysed Steam exe mapped as an image (skipped without the exe).
 add_executable(sigdb_tests tests/sigdb_tests.cpp src/sigdb.cpp src/log.cpp)
 target_include_directories(sigdb_tests PRIVATE src)

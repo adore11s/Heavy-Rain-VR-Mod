@@ -7,7 +7,8 @@
 
 namespace hrvr::itemclass {
 
-enum Class : int { kHeld = 0, kWorn = 1, kStays = 2, kPerson = 3, kNotKnown = -1 };
+// kArm: held, but it can hang on a forearm - MovieCarry also gets the forearms (owner "Stay with the arm", 3003 bag).
+enum Class : int { kHeld = 0, kWorn = 1, kStays = 2, kPerson = 3, kArm = 4, kNotKnown = -1 };
 
 struct Entry {
     uint64_t hash;
@@ -47,7 +48,7 @@ inline int Of(const char* movie, const char* entity) {
 }
 
 inline const char* Name(int c) {
-    return c == kHeld ? "held" : c == kWorn ? "worn" : c == kStays ? "stays" : c == kPerson ? "person" : "not in the table";
+    return c == kHeld ? "held" : c == kWorn ? "worn" : c == kStays ? "stays" : c == kPerson ? "person" : c == kArm ? "held (can hang on an arm)" : "not in the table";
 }
 
 }  // namespace hrvr::itemclass

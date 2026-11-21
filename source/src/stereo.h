@@ -27,7 +27,7 @@ void SetCameraPush(float metres);
 bool EyeImageSize(uint32_t* width, uint32_t* height);
 // Rendering method (stereo.cpp): Native, AFR (one eye per frame), AER (one eye per frame, both eyes of a pair
 // from the same head pose; hrvr.ini only) or Mono (playbook 07.7: one render per frame from the centre of the
-// head, the same picture to both eyes); saved to hrvr.ini (rendering_method). AFR is the default.
+// head, the same picture to both eyes); saved to hrvr.ini (rendering_method). Native is the default (1.0.2, owner).
 enum { kNative = 0, kAfr = 1, kAer = 2, kMono = 3 };
 int Method();
 void SetMethod(int method);

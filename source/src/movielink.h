@@ -27,6 +27,15 @@ struct Link {
 // `player` right now (seen within the last 250 ms)? Fills `out` when it is.
 bool Find(void* node, const void* parent, void* player, Link* out);
 
+// 1.0.5 (playbook 19.8 point 11 L1 census): every object of the movies that play with the player's node right now
+// (the player itself left out), up to `max`. Returns the count written.
+struct LinkedObject {
+    void* node = nullptr;
+    int cls = -1;
+    char entity[64] = {};
+};
+int ListLinked(void* player, LinkedObject* out, int max);
+
 // "fpstatus": the movies seen in the last second.
 void LogStatus();
 

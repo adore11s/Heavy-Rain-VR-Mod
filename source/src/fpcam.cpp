@@ -53,7 +53,7 @@ float g_near = 0.05f;            // m; the game's near plane is set for cameras 
 // 0.36.0 (owner 2026-11-20: "make the near VR headset radius of disappearing things bigger in first person (F1 and
 // F3)"): 0.20 m (was 0.12).
 float g_headClip = 0.20f;
-int g_headMode = 0;  // 0 off (default since 0.36.13), 1 clip, 2 collapse (= the panel's Hide head On)
+int g_headMode = 2;  // 0 off, 1 clip, 2 collapse (= the panel's Hide head On; default since 1.0.2, owner)
 // Render-only body (fpbody.h): head hidden (F1 and F3), body turned to the view and arms on the controllers (F1).
 bool g_hideHead = true, g_turnBody = true, g_arms = true, g_idleHold = true;
 bool g_bodyFollow = true;  // 0.36.12: fp_body_follow - the drawn body under the headset (F1)
@@ -145,7 +145,7 @@ void ReadSettings() {
     g_near = number(L"fp_near", g_near, 0.f, 1.f);
     fpbody::SetEnabled(on(L"fp_body", true));
     {
-        const std::wstring m = text(L"fp_hidehead", L"off");  // 0.36.13: the head drawn by default (owner)
+        const std::wstring m = text(L"fp_hidehead", L"collapse");  // 1.0.2: head not drawn by default (owner)
         g_headMode = _wcsicmp(m.c_str(), L"collapse") == 0 ? 2
                      : (_wcsicmp(m.c_str(), L"off") == 0 || _wcsicmp(m.c_str(), L"false") == 0 || m == L"0") ? 0
                                                                                                            : 1;
@@ -662,7 +662,7 @@ void Prepare(void* cameraNode, const pose::Mat4& authored, const xr::FrameInput&
         // 14.12: say every 10 s which path the fingers took, so a run tells it
         Log("FPFINGER fingers %s", !g_fingers ? "off (fp_fingers=off)"
                                   : (g_touchSeen[0] || g_touchSeen[1])
-                                      ? "on (from finger touch: point, thumbs up, fist, gun)"
+                                      ? "on (from finger touch: point, fist; thumb from grip)"
                                       : "on (no touch reported by the controllers: grip and trigger only)");
         Log("FPDIAG %s view yaw %.0f pitch %.0f eye (%.2f %.2f %.2f) head-root %.2f m ctrlMode %d face %s level %.0f (%s) "
             "prompts %d arms %s%s",
@@ -801,7 +801,7 @@ bool CutsceneFP() {
 // (fp_cloth_hair). Checked on every playable outfit by tools/rig_viz.py --checks: eyes (M1) and teeth / tongue / mouth
 // (M2) collapse on all, the face bones (K2) are all in the set, hair (M3) except the scalp's edge on the neck weighted
 // to Neck (Ethan 53, Jayden 79, Shelby 9, Madison 2 vertices, at most 8 cm from the neck joint, behind and below the
-// eye). Off (default) = the head drawn (fp_near 5 cm still keeps the eyelids and lashes out of the eyes). Live.
+// eye). Off = the head drawn (fp_near 5 cm still keeps the eyelids and lashes out of the eyes). Live.
 bool HideHead() {
     std::lock_guard lock(g_mutex);
     return g_hideHead && g_headMode == 2;

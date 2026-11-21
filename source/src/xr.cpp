@@ -27,6 +27,7 @@
 #include "game.h"
 #include "haptics_math.h"
 #include "menus.h"
+#include "swap_format.h"
 #include "videowatch.h"
 #include "welcome.h"
 #include "welcome_draw.h"
@@ -225,7 +226,13 @@ struct SrvEntry {
 };
 SrvEntry g_srvCache[8] = {};
 
-const char kBlitHlsl[] = R"(
+// 1.0.1: the exact sRGB decode (swap_format.h SrgbToLinear), shared by both shaders; pow(2.2) crushed dark tones.
+#define HRVR_SRGB_HLSL                                                                                     \
+    "float3 SrgbToLinear(float3 v) {\n"                                                                     \
+    "    v = saturate(v);\n"                                                                                \
+    "    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);\n"                                \
+    "}\n"
+const char kBlitHlsl[] = HRVR_SRGB_HLSL R"(
 cbuffer Rect : register(b0) { float4 srcRect; float4 flags; float4 extra; };
 Texture2D src : register(t0);
 SamplerState samp : register(s0);
@@ -245,7 +252,7 @@ float4 PSMain(VsOut i) : SV_Target {
         float n = frac(52.9829189 * frac(dot(i.pos.xy, float2(0.06711056, 0.00583715))));
         c.rgb = saturate(c.rgb + (n - 0.5) / 255.0);
     }
-    if (flags.x > 0.5) c.rgb = pow(saturate(c.rgb), 2.2);  // sRGB bytes -> linear for an sRGB RTV
+    if (flags.x > 0.5) c.rgb = SrgbToLinear(c.rgb);  // sRGB bytes -> linear (sRGB RTV or linear swapchain)
     // flags.y: 0 opaque, 1 keep alpha, 2 UI drawn over transparent black (alpha from coverage),
     // 3 brightness only: black UI overlays (cutscene letterbox bars, vignette) drop out.
     float lum = max(c.r, max(c.g, c.b));
@@ -261,7 +268,7 @@ float4 PSMain(VsOut i) : SV_Target {
 
 // 0.29.0 AFR stale-eye turn (playbook 06.3a; xr_geometry.h MakeWarp / WarpUv are the same maths, desk-tested): each
 // output pixel's direction in this frame's eye goes through M into the old eye and samples the old picture there.
-const char kWarpHlsl[] = R"(
+const char kWarpHlsl[] = HRVR_SRGB_HLSL R"(
 cbuffer Warp : register(b0) { float4 r0; float4 r1; float4 r2; float4 nowT; float4 wasT; };
 Texture2D src : register(t0);
 SamplerState samp : register(s0);
@@ -277,7 +284,7 @@ float4 PSMain(VsOut i) : SV_Target {
         float n = frac(52.9829189 * frac(dot(i.pos.xy, float2(0.06711056, 0.00583715))));
         c.rgb = saturate(c.rgb + (n - 0.5) / 255.0);
     }
-    if (r0.w > 0.5) c.rgb = pow(saturate(c.rgb), 2.2);  // sRGB bytes -> linear for an sRGB RTV
+    if (r0.w > 0.5) c.rgb = SrgbToLinear(c.rgb);  // sRGB bytes -> linear (sRGB RTV or linear swapchain)
     return float4(c.rgb, 1);
 }
 )";
@@ -1220,11 +1227,15 @@ bool Start(ID3D11Device* device) {
     xrEnumerateSwapchainFormats(g_session, 0, &nf, nullptr);
     std::vector<int64_t> formats(nf);
     xrEnumerateSwapchainFormats(g_session, nf, &nf, formats.data());
-    int64_t format = 0;
-    for (int64_t want : {int64_t(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), int64_t(DXGI_FORMAT_R8G8B8A8_UNORM)})
-        for (int64_t f : formats)
-            if (!format && f == want) format = f;
-    if (!format) format = formats.empty() ? DXGI_FORMAT_R8G8B8A8_UNORM : formats[0];
+    // 1.0.1 (swap_format.h): either sRGB format, else a linear one the shaders linearise for (washed-out fix).
+    const swapfmt::Choice fmt = swapfmt::Choose(formats.data(), formats.size());
+    const int64_t format = fmt.format;
+    {
+        std::string list;
+        for (int64_t f : formats) list += (list.empty() ? "" : " ") + std::to_string(f);
+        Log("XR swapchain formats offered: %s -> %lld (%s)", list.empty() ? "(none)" : list.c_str(),
+            static_cast<long long>(format), fmt.srgb ? "sRGB" : "LINEAR - eye pictures are linearised");
+    }
     g_recommendedW = std::max(vcv[0].recommendedImageRectWidth, vcv[1].recommendedImageRectWidth);
     g_maxEyeW = std::max(vcv[0].maxImageRectWidth, vcv[1].maxImageRectWidth);
     g_maxEyeH = std::max(vcv[0].maxImageRectHeight, vcv[1].maxImageRectHeight);
@@ -1252,6 +1263,7 @@ bool Start(ID3D11Device* device) {
     Log("XR swapchain format %lld, eye size %ux%u", static_cast<long long>(format),
         vcv[0].recommendedImageRectWidth, vcv[0].recommendedImageRectHeight);
 
+    g_linearizeInShader = false;  // set below per the format and the views (a new session may get another format)
     for (int e = 0; e < 7; ++e) {
         if (e == 5 && !devtools::Available()) continue;  // no overlay swapchain in the release build
         EyeSwapchain& s = e < 2 ? g_eyes[e] : e == 2 ? g_quad : e == 3 ? g_panelSc : e == 4 ? g_cursorSc : e == 5 ? g_tpSc : g_welSc;
@@ -1277,16 +1289,19 @@ bool Start(ID3D11Device* device) {
         // The game's pixels are already sRGB-encoded bytes. Write them raw through a UNORM view
         // of the (typeless) sRGB image; if the runtime's texture is not typeless, fall back to
         // the native format and linearise in the shader (double-gamma trap, playbook ch09).
+        // 1.0.1: a linear (non-sRGB) swapchain always gets linearised pixels - the runtime encodes them for the
+        // display; raw sRGB bytes there were encoded twice (washed out).
         for (auto& img : s.images) {
             D3D11_RENDER_TARGET_VIEW_DESC rd{};
             rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            rd.Format = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT(format);
+            rd.Format = DXGI_FORMAT(fmt.rawView);
             ID3D11RenderTargetView* rtv = nullptr;
-            if (FAILED(device->CreateRenderTargetView(img.texture, &rd, &rtv))) {
+            bool rawView = SUCCEEDED(device->CreateRenderTargetView(img.texture, &rd, &rtv));
+            if (!rawView) {
                 rd.Format = DXGI_FORMAT(format);
-                g_linearizeInShader = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
                 device->CreateRenderTargetView(img.texture, &rd, &rtv);
             }
+            if (swapfmt::Linearize(fmt, rawView)) g_linearizeInShader = true;
             s.rtvs.push_back(rtv);
         }
     }
@@ -2481,12 +2496,13 @@ bool FlatFrame(ID3D11DeviceContext* ctx, ID3D11Texture2D* backbuffer, ID3D11Text
             D3D11_TEXTURE2D_DESC d{};
             flatSrc->GetDesc(&d);
             Blit(ctx, flatSrc, 0, d.Height, g_quad.rtvs[idx], g_quad.width, g_quad.height, 0, false,
-                 g_linearizeInShader, 0.f, 0.004f);
+                 g_linearizeInShader, 0.f, 0.f);
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             xrReleaseSwapchainImage(g_quad.handle, &ri);
             haveQuad = true;
         }
-        // The whole flat frame, opaque; the grey border keeps its edges visible on dark screens.
+        // The whole flat frame, opaque. 1.0.1 (owner: "remove the white border around cutscenes"): no grey frame any
+        // more (it was 0.45 grey, 0.4 % of the width, and read as white around videos and cutscenes).
         quad.layerFlags = 0;
         if (haveQuad) layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
     }

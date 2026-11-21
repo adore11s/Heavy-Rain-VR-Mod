@@ -115,7 +115,7 @@ void LogBlock(bool stereo3D) {
             const wchar_t* key;
             const wchar_t* def;
         } keys[] = {{L"symfov", L"on"},   {L"enginefov", L"on"},   {L"prime", L"off"},      {L"small_views", L"fixed"},
-                    {L"ui", L"panel"},    {L"world_scale", L"1.0"}, {L"rendering_method", L"afr"}, {L"vr_dof", L"off"},
+                    {L"ui", L"panel"},    {L"world_scale", L"1.0"}, {L"rendering_method", L"native"}, {L"vr_dof", L"off"},
                     {L"desktop_window", L"720"}, {L"desktop_crop", L"1"}};
         for (const auto& k : keys) {
             wchar_t v[64];

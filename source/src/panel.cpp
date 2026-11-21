@@ -248,7 +248,7 @@ int Rows(Row* r) {
     const int size = rendersize::Setting();
     r[n++] = {L"VR picture size (per eye)", kSizeDown, kSizeUp, nullptr, nullptr, false, 1,
               size != rendersize::kGame, size != rendersize::kAuto};
-    // Native | AFR | Mono (playbook 07.7 / 11; stereo.h); AFR is the default (owner 2026-10-28). AER (hrvr.ini
+    // Native | AFR | Mono (playbook 07.7 / 11; stereo.h); Native is the default (owner 2026-11-20, was AFR). AER (hrvr.ini
     // rendering_method=aer only, not a template row) selects none of the three.
     const int m = stereo::Method();
     r[n++] = {L"Rendering method", kNative, kAfr, L"Native", L"AFR", false, 0, true, true, kMono, L"Mono",

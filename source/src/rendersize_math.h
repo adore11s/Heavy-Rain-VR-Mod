@@ -38,18 +38,20 @@ inline int Step(int v, int dir) {
     return i == 0 ? kGame : i == kPresetCount + 1 ? kAuto : kPresets[i - 1];
 }
 
-// When to change the render size: square only after 0.5 s of 3D frames, back to the game's own after 1.5 s
-// without (a loading screen), at most once every 2 s; immediately the game's own when VR stops. A full-screen video
-// (xr video mode) counts as no 3D at once: Heavy Rain keeps rendering its 3D viewport behind the intro video
-// (LIVE 0.6.0: the video stayed square), so 3D frames alone do not mean a 3D screen.
+// When to change the render size: square only after 0.5 s of 3D frames and at least 2 s after the last change; the
+// game's own size AT ONCE when the headset shows the flat screen (scene3D false = no stereo pass for 300 ms, the same
+// test that puts the flat screen up) or VR stops. 1.0.1 (owner: "the 2d screen is square aspect for few seconds and
+// then it turns into 16:9, it needs to be instantly 16:9"): before, going back waited 1.5 s without 3D and the 2 s
+// spacing, so the flat screen showed the square picture for up to ~3.5 s. A full-screen video (xr video mode) counts
+// as no 3D at once: Heavy Rain keeps rendering its 3D viewport behind the intro video (LIVE 0.6.0: the video stayed
+// square), so 3D frames alone do not mean a 3D screen.
 struct SwitchPolicy {
     uint64_t since3D = 0, last3D = 0, lastChange = 0;
 
     uint32_t Want(bool xrRunning, bool scene3D, uint32_t target, uint32_t applied, uint64_t now, bool video = false) {
         if (video) {
             since3D = last3D = 0;
-            if (!xrRunning || !target || !applied) return 0;
-            return lastChange && now - lastChange < 2000 ? applied : 0;
+            return 0;
         }
         if (scene3D) {
             if (!since3D) since3D = now;
@@ -57,15 +59,10 @@ struct SwitchPolicy {
         } else {
             since3D = 0;
         }
-        if (!xrRunning || !target) return 0;
-        uint32_t want = applied;
-        if (!applied) {
-            if (since3D && now - since3D >= 500) want = target;
-        } else {
-            want = last3D && now - last3D < 1500 ? target : 0;
-        }
-        if (want != applied && lastChange && now - lastChange < 2000) return applied;
-        return want;
+        if (!xrRunning || !target || !scene3D) return 0;
+        if (applied) return target;  // (a changed setting: the new size)
+        if (since3D && now - since3D >= 500 && !(lastChange && now - lastChange < 2000)) return target;
+        return 0;
     }
 };
 

@@ -9,7 +9,7 @@ Play **Heavy Rain (PC)** in VR. Every frame is drawn in true 3D for each eye wit
 **In VR**
 
 - **True 3D for each eye.** The game is drawn separately for each eye, with full head tracking.
-- **Rendering method:** AFR (one eye per frame, the default), Native (both eyes every frame) or Mono (one picture for both eyes, the fastest), set in the VR settings panel.
+- **Rendering method:** Native (both eyes every frame, the default), AFR (one eye per frame) or Mono (one picture for both eyes, the fastest), set in the VR settings panel.
 - **A square VR picture** that matches your headset's resolution automatically (or a size you choose), whatever your monitor's resolution.
 - **The window on your monitor** is 1280 x 720 while VR runs. Drag its edges to resize it; it stays 16:9. Your normal window comes back when VR ends.
 - **Game settings:** no need to change them. The mod starts the game in a window by itself.
@@ -24,10 +24,10 @@ Play **Heavy Rain (PC)** in VR. Every frame is drawn in true 3D for each eye wit
 - **First person on / off:** hold your right hand next to your head and press **○ (PS VR2) / B (Meta Quest, Index)**. Press it while walking for gameplay, or during a cutscene for cutscenes. By default both are off (also in the VR settings panel, or **F1** / **F3** on the keyboard). You can see your whole body.
 - **Cutscenes from the character's eyes:** the view sits between the character's own eyes and moves with their head.
 - **Motion controls:** while you walk the character, your controllers move their arms and hands. Things a scene hands your character (a pizza box, a bottle, a gun) go to your controller hand.
-- **Finger detection.** Rest your fingers on the controller and the character's fingers follow: lift your index finger to point, lift your thumb for a thumbs-up, squeeze for a fist.
+- **Finger detection.** Rest your fingers on the controller and the character's fingers follow: lift your index finger to point, squeeze for a fist; the thumb closes with your grip.
 - **Your body follows your headset:** lean or take a step and the body moves with you, so your hands always reach.
 - **Prompts in front of you:** action prompts, hold and mash prompts, tutorial texts, thoughts and dialogue choices appear in front of you instead of around the character.
-- **In the VR settings panel:** smooth or snap turning (and its speed / angle); motion controls on or off (off: the controllers work like a gamepad); hide head on or off (on: the character's head, hair, eyes and teeth are not drawn in first person).
+- **In the VR settings panel:** smooth or snap turning (and its speed / angle); motion controls on or off (off: the controllers work like a gamepad); hide head on or off (on, the default: the character's head, hair, eyes and teeth are not drawn in first person).
 
 ## Install
 

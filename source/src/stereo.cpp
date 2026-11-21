@@ -78,7 +78,7 @@ bool g_uiPanel = true;               // ui=panel|eyes
 bool g_prime = false;                // prime=on: run each viewport's camera setup before its eye pass
 bool g_engineFov = true;             // enginefov=on|off: FOV/aspect scalars describe the headset frustum
 float g_worldScale = 1.f;            // world_scale: engine units per metre for the eye offsets
-// Rendering method (rendering_method=native|afr|aer|mono; default afr, owner 2026-10-28):
+// Rendering method (rendering_method=native|afr|aer|mono; default native, owner 2026-11-20 - was afr 2026-10-28):
 //   Native  both eyes every game frame.
 //   AFR     (playbook 18) one eye per game frame, alternating; the other eye keeps its last image and is submitted
 //           with the pose it was rendered for (xr::OnSingleEye). Roughly halves the render work; moving things
@@ -91,7 +91,7 @@ float g_worldScale = 1.f;            // world_scale: engine units per metre for 
 //   Mono    (playbook 07.7, 0.23.0) one render per game frame, always eye slot 0, from the centre of the head
 //           with a symmetric frustum covering both eyes (xr BeginGameFrame); each eye is cut from that one picture
 //           and submitted with the centre pose. Cheapest and most robust; the world has no stereo depth.
-std::atomic<int> g_method{kAfr};
+std::atomic<int> g_method{kNative};
 int g_afrNext = 0;
 int g_aerPhase = 0;          // 0: next frame starts a pair (eye 0); 1: next frame finishes it (eye 1)
 xr::EyeView g_aerEyes[2];    // the views the current pair is rendered with
@@ -1787,7 +1787,7 @@ bool Install() {
                    : _wcsicmp(m.c_str(), L"mono") == 0 ? kMono
                    : _wcsicmp(m.c_str(), L"afr") == 0  ? kAfr
                    : m.empty() && IniString(L"afr_rendering", L"").size() ? (IniOn(L"afr_rendering", false) ? kAfr : kNative)
-                                                                           : kAfr;
+                                                                           : kNative;  // 1.0.2: Native default (owner)
     }
     xr::SetMono(g_method == kMono);
     g_vrDof = IniOn(L"vr_dof", false);

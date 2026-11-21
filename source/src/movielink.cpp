@@ -118,15 +118,16 @@ bool Find(void* node, const void* parent, void* player, Link* out) {
         if (!withPlayer || !hit) continue;
         if (!m.logged) {
             m.logged = true;
-            int per[5] = {};
+            int per[6] = {};  // cls + 1: not in the table, held, worn, stays, person, arm (1.0.5: arm wrote past 5)
             std::string list;
             for (int i = 0; i < m.count; ++i) {
                 if (m.obj[i].node == player) continue;
-                ++per[m.obj[i].cls + 1];
+                const int c = m.obj[i].cls + 1;
+                if (c >= 0 && c < 6) ++per[c];
                 if (list.size() < 900) list += std::string(list.empty() ? "" : ", ") + m.obj[i].name + " (" + itemclass::Name(m.obj[i].cls) + ")";
             }
-            Log("FPITEM movie \"%s\" plays with the player: %d objects - held %d, worn %d, stays %d, person %d, not in the "
-                "table %d: %s", m.name, m.count - 1, per[1], per[2], per[3], per[4], per[0], list.c_str());
+            Log("FPITEM movie \"%s\" plays with the player: %d objects - held %d, worn %d, stays %d, person %d, arm %d, "
+                "not in the table %d: %s", m.name, m.count - 1, per[1], per[2], per[3], per[4], per[5], per[0], list.c_str());
         }
         out->cls = hit->cls;
         std::snprintf(out->entity, sizeof(out->entity), "%s", hit->name);
@@ -134,6 +135,27 @@ bool Find(void* node, const void* parent, void* player, Link* out) {
         return true;
     }
     return false;
+}
+
+int ListLinked(void* player, LinkedObject* out, int max) {
+    if (!g_installed || !player || !out || max <= 0) return 0;
+    const uint64_t now = GetTickCount64();
+    std::lock_guard lock(g_mutex);
+    int n = 0;
+    for (const Movie& m : g_movies) {
+        if (!m.movie || now - m.ms > kFreshMs) continue;
+        bool withPlayer = false;
+        for (int i = 0; i < m.count; ++i) withPlayer = withPlayer || m.obj[i].node == player;
+        if (!withPlayer) continue;
+        for (int i = 0; i < m.count && n < max; ++i) {
+            if (m.obj[i].node == player) continue;
+            LinkedObject& o = out[n++];
+            o.node = m.obj[i].node;
+            o.cls = m.obj[i].cls;
+            std::snprintf(o.entity, sizeof(o.entity), "%s", m.obj[i].name);
+        }
+    }
+    return n;
 }
 
 void LogStatus() {

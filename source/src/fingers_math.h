@@ -68,7 +68,9 @@ inline Amounts FromInput(const Input& in) {
         const float rest = 0.15f + 0.85f * grip;
         r.a[kMiddle] = r.a[kRing] = r.a[kPinky] = rest;
         r.a[kIndex] = (in.touchIndex || in.trigger > 0.05f) ? 0.35f + 0.65f * trig : 0.f;  // lifted: pointing
-        r.a[kThumb] = in.touchThumb ? 0.55f + 0.35f * grip : 0.f;                          // lifted: thumbs up
+        // Owner 2026-11-21 (playbook 14.12): no thumb-touch pose - the thumb going down whenever the real thumb rests
+        // on the stick / buttons / thumb rest, and the thumbs up / gun from lifting it, are gone; it follows the grip.
+        r.a[kThumb] = 0.9f * grip;
     } else {
         const float rest = 0.45f + 0.55f * grip;
         r.a[kMiddle] = r.a[kRing] = r.a[kPinky] = rest;

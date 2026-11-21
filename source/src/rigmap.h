@@ -321,6 +321,20 @@ struct MovieCarry {
     // A phone held to the ear is steady against both, so it stays in the hand.
     static constexpr float kHead = 0.20f;
     static constexpr float kHeadRatio = 3.f;
+    // On the FOREARM, not in the hand (owner 2026-11-20 "Stay with the arm": a bag hanging on the forearm while that hand
+    // does something else - 3003 shop bag while Madison phones): a model bone lies along that forearm (elbow -> wrist,
+    // kArmT0 .. kArmT1 of the way, within kArmR of the line). DATA (Gate 2, 3003 BAG01): on the arm the nearest bone is
+    // at 0.69 .. 0.91, 1 .. 11 cm from the line; held in the hand the nearest bone is beyond the wrist (1.0).
+    static constexpr float kArmR = 0.12f;
+    static constexpr float kArmT0 = 0.1f;
+    static constexpr float kArmT1 = 0.95f;
+    // It goes on the forearm only while it also slides against that hand (smoothed step >= kMoving: 3003 on the arm 2 ..
+    // 15 mm per frame; 4101 bag held in both hands, along the right forearm, ~0), and stays there until it leaves the
+    // arm (no model bone within kKeep of elbow -> wrist) - it swings past the wrist and back (3003 frames 600 .. 1800;
+    // a release when steadier against the hand let it into the hand for 3 s). Only for an object of the ARM class
+    // (item_class.h kArm, decided per pair from its whole clip by rig_gate2.py: >= 10 s on the arm) - fpbody passes
+    // `fore` only for those; tested on every skinned prop the per-frame test opened 8 Gate 2 pairs.
+    bool armLatch[2] = {false, false};
     static constexpr int kLoose = 2;
     static constexpr int kRamp = 6;
     bool linkOnly = false;
@@ -340,11 +354,23 @@ struct MovieCarry {
     bool cand[2] = {false, false};
     float candRel[2][3] = {}, candTravel[2] = {0.f, 0.f};
     bool have = false;
+    // Playbook r37 19.8 point 11 L2: distances to the object's NEAREST MODEL BONE, never only its root (a skinned prop's
+    // root can be far from the part in the fingers - DATA docs/items/L2.md: 45 held pairs, the 3003 shop bag's strap
+    // 40 cm from its root). Per hand: the bone nearest that wrist, kept while that hand holds it or is building a pick-up
+    // (its place in the hand must stay one point); point 0 = the root. With one point this is exactly the 0.33.0 rule.
+    int bone[2] = {0, 0};
+    bool boneChosen[2] = {false, false};
+    float lastPt[2][3] = {};
+    static constexpr int kWin = 10;  // samples: rig_gate2's truth keeps a run while it moved <= kSlip in 10 frames
+    float hist[2][kWin][3] = {};
+    int histN[2] = {0, 0};
     void Seed(int h) {
         held = h >= 0;
         hand = h;
         loose = 0;
         anchored = false;  // taken from the first sample
+        boneChosen[0] = boneChosen[1] = false;  // the seeded hand's bone too: the nearest in the first sample
+        histN[0] = histN[1] = 0;
         weight[0] = weight[1] = 0.f;
         if (h >= 0) weight[h] = 1.f;
     }
@@ -352,15 +378,73 @@ struct MovieCarry {
     // Writes the two hands' weights to out[2]. Returns the hand with the larger weight (-1 = none).
     // head: the clean Head bone world (16 floats) or nullptr (then nothing is taken for worn on the head).
     int Feed(bool link, const float* o, const float* const w[2], float* out, const float* head = nullptr) {
+        return FeedPoints(link, o, 1, w, out, head);
+    }
+    // pts: n model-bone positions (world, 3 floats each), pts[0..2] = the root.
+    // fore[s]: the clean ForeArm bone world (the elbow; nullptr = no forearm test for that hand).
+    int FeedPoints(bool link, const float* pts, int n, const float* const w[2], float* out, const float* head = nullptr,
+                   const float* const* fore = nullptr) {
+        const float* o = pts;  // the root: world speed, cuts, the head test
+        if (n < 1) n = 1;
         float r[2][3] = {}, d[2] = {1e9f, 1e9f};
-        bool ok[2] = {false, false};
+        bool ok[2] = {false, false}, fresh[2] = {false, false};
+        const float* po[2] = {pts, pts};
+        int nearestBone[2] = {0, 0};
+        float nearestD[2] = {1e9f, 1e9f};
         for (int s = 0; s < 2; ++s) {
+            if (w[s]) {
+                const bool locked = boneChosen[s] && bone[s] < n && ((held && hand == s) || cand[s]);
+                float best = 1e30f;
+                for (int i = 0; i < n; ++i) {
+                    const float* q = pts + 3 * i;
+                    const float dd = (q[0] - w[s][12]) * (q[0] - w[s][12]) + (q[1] - w[s][13]) * (q[1] - w[s][13]) +
+                                     (q[2] - w[s][14]) * (q[2] - w[s][14]);
+                    if (dd < best) best = dd, nearestBone[s] = i;
+                }
+                nearestD[s] = std::sqrt(best);
+                const int b = locked ? bone[s] : nearestBone[s];
+                fresh[s] = b != bone[s];  // another point than lastPt[s] / rel[s] describe: no history for this hand
+                bone[s] = b;
+                boneChosen[s] = true;
+            }
+            po[s] = pts + 3 * (bone[s] < n ? bone[s] : 0);
+            const float* q = po[s];
             float inv[16];
             if (!w[s] || !InvAffine(w[s], inv)) continue;
-            for (int k = 0; k < 3; ++k) r[s][k] = o[0] * inv[k] + o[1] * inv[4 + k] + o[2] * inv[8 + k] + inv[12 + k];
+            for (int k = 0; k < 3; ++k) r[s][k] = q[0] * inv[k] + q[1] * inv[4 + k] + q[2] * inv[8 + k] + inv[12 + k];
             const float* p = w[s] + 12;
-            d[s] = std::sqrt((o[0] - p[0]) * (o[0] - p[0]) + (o[1] - p[1]) * (o[1] - p[1]) + (o[2] - p[2]) * (o[2] - p[2]));
+            d[s] = std::sqrt((q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) + (q[2] - p[2]) * (q[2] - p[2]));
             ok[s] = true;
+        }
+        // Per hand: the world step of that hand's point (the root's step with one point).
+        bool hv[2] = {have && !fresh[0], have && !fresh[1]};
+        float ws[2] = {0.f, 0.f};
+        for (int s = 0; s < 2; ++s)
+            if (hv[s]) {
+                const float* q = po[s];
+                ws[s] = std::sqrt((q[0] - lastPt[s][0]) * (q[0] - lastPt[s][0]) + (q[1] - lastPt[s][1]) * (q[1] - lastPt[s][1]) +
+                                  (q[2] - lastPt[s][2]) * (q[2] - lastPt[s][2]));
+            }
+        for (int s = 0; s < 2; ++s)
+            if (fresh[s]) cand[s] = false;
+        // 1.0.5 hand-over history: the point's place in each hand over the last kWin samples (one point: a bone switch
+        // or a cut starts it again). drift = how far it moved against the hand since the oldest of them.
+        float drift[2] = {0.f, 0.f};
+        for (int s = 0; s < 2; ++s) {
+            const bool cutNow = have && (o[0] - last[0]) * (o[0] - last[0]) + (o[1] - last[1]) * (o[1] - last[1]) +
+                                                (o[2] - last[2]) * (o[2] - last[2]) > kCut * kCut;
+            if (!ok[s] || fresh[s] || cutNow) histN[s] = 0;
+            if (!ok[s]) continue;
+            if (histN[s] == kWin) {
+                for (int i = 1; i < kWin; ++i)
+                    for (int k = 0; k < 3; ++k) hist[s][i - 1][k] = hist[s][i][k];
+                --histN[s];
+            }
+            for (int k = 0; k < 3; ++k) hist[s][histN[s]][k] = r[s][k];
+            ++histN[s];
+            const float* a = hist[s][0];
+            drift[s] = std::sqrt((r[s][0] - a[0]) * (r[s][0] - a[0]) + (r[s][1] - a[1]) * (r[s][1] - a[1]) +
+                                 (r[s][2] - a[2]) * (r[s][2] - a[2]));
         }
         int nearest = -1;
         for (int s = 0; s < 2; ++s)
@@ -378,17 +462,17 @@ struct MovieCarry {
         bool movesWith[2] = {false, false}, nowWith[2] = {false, false};
         float relStep[2] = {1e9f, 1e9f};
         for (int s = 0; s < 2; ++s) {
-            if (have && ok[s]) {
+            if (hv[s] && ok[s]) {
                 const float ax = r[s][0] - rel[s][0], ay = r[s][1] - rel[s][1], az = r[s][2] - rel[s][2];
                 relStep[s] = std::sqrt(ax * ax + ay * ay + az * az);
             }
-            if (have && ok[s] && d[s] <= kKeep && worldStep >= kMoving) {
+            if (hv[s] && ok[s] && d[s] <= kKeep && ws[s] >= kMoving) {
                 const float ax = r[s][0] - rel[s][0], ay = r[s][1] - rel[s][1], az = r[s][2] - rel[s][2];
                 // and it moved much less against the hand than in the world: a still hand beside an item another hand
                 // nudges sees it move as much as the world does (Gate 2, 5001 origami nudged 0.6 cm next to the
                 // resting left hand was picked and kept for 250 frames).
                 const float rs = std::sqrt(ax * ax + ay * ay + az * az);
-                nowWith[s] = rs <= kSteady && rs * kRatio <= worldStep;
+                nowWith[s] = rs <= kSteady && rs * kRatio <= ws[s];
                 movesWith[s] = nowWith[s] && d[s] <= kNear;
             }
             if (!ok[s] || d[s] > (cand[s] ? kKeep : kNear)) {  // starts within kNear, may go on to kKeep
@@ -406,12 +490,33 @@ struct MovieCarry {
             // path length WITH the hand: only samples where it kept its place against it (a resting item's clip does
             // not move at all; a notepad flung 11 cm in one frame while 5 cm against the hand does not count - Gate 2,
             // 1101 NOTEPAD_THROW was picked up again in flight)
-            if (relStep[s] <= kWithHand) candTravel[s] += worldStep;
+            if (relStep[s] <= kWithHand) candTravel[s] += ws[s];
             // (A ratio on the whole stretch, with 1 cm, was tried: the hand settling on the item counts as drift and
             // the pizza box came 7 frames later; 164 open pairs instead of 82. Gate 2, 2026-11-20.)
             // ... and only in a sample where it moves at all (> kStill): a memory card at rest beside a still hand that
             // had carried it earlier was passed to it (Gate 2, 2901 PHONEMEMCARD_TAKE)
-            movesWith[s] = movesWith[s] || (candTravel[s] >= kPick && worldStep > kStill);
+            movesWith[s] = movesWith[s] || (candTravel[s] >= kPick && ws[s] > kStill);
+        }
+        // Hanging on a forearm? (any model bone along elbow -> wrist; latched, see armLatch)
+        bool alongArm[2] = {false, false}, nearArm[2] = {false, false};
+        // Only a prop with a skeleton of its own (a strap / cloth that can hang) - a rigid sword or bat lies along the
+        // forearm in the hand (Gate 2: 0201 sword pairs opened when every object was tested).
+        for (int s = 0; s < 2 && fore && n > 1; ++s) {
+            if (!fore[s] || !w[s]) continue;
+            const float* a = fore[s] + 12;
+            const float* b = w[s] + 12;
+            const float ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+            const float l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+            if (l2 < 1e-6f) continue;
+            for (int i = 0; i < n; ++i) {
+                const float* q = pts + 3 * i;
+                const float t = ((q[0] - a[0]) * ab[0] + (q[1] - a[1]) * ab[1] + (q[2] - a[2]) * ab[2]) / l2;
+                const float tc = t < 0.f ? 0.f : t > 1.f ? 1.f : t;
+                const float x = q[0] - a[0] - tc * ab[0], y = q[1] - a[1] - tc * ab[1], z = q[2] - a[2] - tc * ab[2];
+                const float dd = x * x + y * y + z * z;
+                if (dd <= kKeep * kKeep) nearArm[s] = true;
+                if (t >= kArmT0 && t <= kArmT1 && dd <= kArmR * kArmR) alongArm[s] = true;
+            }
         }
         // Worn on the head?
         bool onHead[2] = {false, false};
@@ -438,9 +543,24 @@ struct MovieCarry {
                 if (hok && dh <= kHead && !(emaHand[s] * kHeadRatio <= emaHead)) movesWith[s] = false;
             }
         }
+        // The forearm latch (after the head test: emaHand is this sample's).
+        bool onArm[2] = {false, false};
+        for (int s = 0; s < 2; ++s) {
+            const bool fok = fore && fore[s] && w[s];
+            if (!fok || !nearArm[s]) armLatch[s] = false;
+            else if (alongArm[s] && emaHand[s] >= kMoving) armLatch[s] = true;  // along it AND sliding against the hand
+                                                                                 // (4101: a bag held in both hands lies
+                                                                                 // along the right forearm, still in hand)
+        }
+        // On either arm: no hand takes it (3003: the right hand holding the phone beside the bag on the left forearm
+        // took it for 3 s).
+        for (int s = 0; s < 2; ++s) {
+            onArm[s] = armLatch[0] || armLatch[1];
+            if (onArm[s]) movesWith[s] = false;
+        }
         for (int k = 0; k < 3; ++k) last[k] = o[k];
         for (int s = 0; s < 2; ++s)
-            for (int k = 0; k < 3; ++k) rel[s][k] = r[s][k];
+            for (int k = 0; k < 3; ++k) rel[s][k] = r[s][k], lastPt[s][k] = po[s][k];
         // A cut: the hold ends in this sample and both weights go to 0 at once (Gate 2: 1903 memory card, 10.9 m in
         // one frame while held - the ramp drew it metres off the hand for 8 frames). The engine cuts the view too.
         const bool cut = worldStep > kCut;
@@ -490,21 +610,59 @@ struct MovieCarry {
             // Put down: it rests in the world this sample while the hand moves against it (> kSteady). Two such
             // samples (kLoose) let go even before it is kSlip from its place (Gate 2: the 0201 plate, 1101 notepad,
             // 2901 memory card were put down with the hand resting beside them and held for up to 50 more frames).
-            const bool putDown = have && worldStep < kMoving && relStep[hand] > kSteady && relStep[hand] < 1e8f;
-            const bool keeps = ok[hand] && d[hand] <= kKeep && (slip <= kSlip || slides) && !onHead[hand] && !putDown;
+            const bool putDown = hv[hand] && ws[hand] < kMoving && relStep[hand] > kSteady && relStep[hand] < 1e8f;
+            const bool keeps = ok[hand] && d[hand] <= kKeep && (slip <= kSlip || slides) && !onHead[hand] && !onArm[hand] &&
+                               !putDown;
             // A held item that keeps its place against the OTHER hand while it still moves is passed, never let go
             // and picked again (2801 golf club in both hands shifts to the right hand at 1.6 mm per frame).
-            const bool passes = !keeps && !onHead[other] && (movesWith[other] ||
-                                           (moving && worldStep >= kRest && ok[other] && d[other] <= kNear &&
+            const bool passes = !keeps && !onHead[other] && !onArm[other] && (movesWith[other] ||
+                                           (moving && ws[other] >= kRest && ok[other] && d[other] <= kNear &&
                                             relStep[other] <= kSteady));  // not an item at rest this sample (2901
                                                                           // memory card put down beside the still
                                                                           // left hand was passed to it)
-            if (keeps) {
+            // 1.0.5 (L5 per-hand check): it slides against this hand while the OTHER hand holds it steady - a hand-over,
+            // or the far hand of two took it first. Kept by "slides" it stayed in the wrong controller (Gate 2: 23 pairs,
+            // 954 frames - 1601 gun, 1301 knife, 5203 TV, 3202 cape ...).
+            // The test is Gate 2's own (rig_gate2 truth: a run in a hand lasts while its point stays within kSlip of
+            // where it was kWin samples ago, and at a break the NEAREST hand takes it): it left this hand by that test
+            // and the other hand, nearer than this one and within kNear, moves. Tried and dropped (Gate 2, 2026-11-21, 24 open before): one sample -
+            // nowWith[other] - flickered two-handed holds between the hands, 17 open but 5 new and +31 drops; smoothed 3x
+            // steadier - emaHand - 23 open (both differ from the truth's test); the truth's test within kKeep without
+            // "nearer" passed thrown items between the hands in flight (wrong-follow 275 -> 784); the same held for 3
+            // samples in a row - 23 open; also requiring the other hand steady (drift <= kSlip) - 20 open, 543 frames
+            // (the far hand kept 10 items: TV, knife, ticket); restarting the new hand's window at the take - no better.
+            // the taking hand also moving with it (<= kWithHand that sample) - 4 open, drops 310.
+            // This one: wrong-hand frames 954 -> 30 (0 pairs), drops 282 -> 270, wrong-follow 275 -> 303; 2 open (1903
+            // seatbelt pick-up 31 frames, 2901 scissors re-picked) - reviewed verdicts in gate2_reviewed.json.
+            const bool handOver = keeps && histN[hand] >= 2 && drift[hand] > kSlip &&
+                                  !onHead[other] && !onArm[other] && ok[other] &&
+                                  d[other] <= kNear && d[other] < d[hand] && ws[other] >= kMoving;
+            if (handOver) {
+                hand = other, loose = 0;
+                for (int k = 0; k < 3; ++k) anchor[k] = r[other][k];
+            } else if (keeps) {
                 loose = 0;
                 for (int k = 0; k < 3; ++k) anchor[k] = slides ? r[hand][k] : anchor[k] + kAnchor * (r[hand][k] - anchor[k]);
             } else if (passes) {
                 hand = other, loose = 0;
                 for (int k = 0; k < 3; ++k) anchor[k] = r[other][k];
+            } else if (n > 1 && ok[hand] && moving && !onHead[hand] && !onArm[hand] && !putDown && nearestBone[hand] != bone[hand] &&
+                       nearestD[hand] <= kNear) {
+                // L2 re-grip: the hand's bone left it but another bone of the same object is in it while the object
+                // still moves (cloth slides through the fingers: Gate 2, 4301 / 2801 coats dropped 11 .. 17 frames).
+                // The hand keeps the object on that bone; its place in the hand starts again from this sample.
+                const int b = nearestBone[hand];
+                const float* q = pts + 3 * b;
+                float inv[16];
+                if (InvAffine(w[hand], inv)) {
+                    for (int k = 0; k < 3; ++k)
+                        r[hand][k] = q[0] * inv[k] + q[1] * inv[4 + k] + q[2] * inv[8 + k] + inv[12 + k];
+                    bone[hand] = b;
+                    // rel / lastPt were stored above for the old bone: the next sample compares against this one
+                    for (int k = 0; k < 3; ++k) anchor[k] = r[hand][k], rel[hand][k] = r[hand][k], lastPt[hand][k] = q[k];
+                    loose = 0;
+                    cand[hand] = false;
+                }
             } else if (++loose >= kLoose) {
                 held = false, hand = -1, loose = 0, anchored = false;
             }
