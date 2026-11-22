@@ -18,7 +18,7 @@
 
 #include <MinHook.h>
 
-#define HRVR_VERSION "1.1"
+#define HRVR_VERSION "1.2"
 
 namespace {
 

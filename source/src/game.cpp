@@ -41,6 +41,7 @@ constexpr AnchorDef kAnchors[] = {
     {"PARTICLE_VB::Next", 0x1408ab530},
     {"LIGHT_GATHER", 0x140a0d160},
     {"RENDER::LoadDisplaySettings", 0x140a70cc0},
+    {"IHM_MENUS::Display3D", 0x14087b8f0},
 };
 static_assert(sizeof(kAnchors) / sizeof(kAnchors[0]) == size_t(Anchor::Count));
 

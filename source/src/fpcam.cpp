@@ -512,7 +512,8 @@ void Prepare(void* cameraNode, const pose::Mat4& authored, const xr::FrameInput&
 
     const pose::Mat4 headWorld = pose::Mul(input.headRel, g_base);
     const pose::Vec3 gaze = fp::Norm(pose::Vec3{-headWorld.m[8], -headWorld.m[9], -headWorld.m[10]});
-    prompts::PublishView(true, Pos(headWorld), gaze, Pos(head));
+    const pose::Vec3 gameCamera{authored.m[12], authored.m[13], authored.m[14]};
+    prompts::PublishView(true, Pos(headWorld), gaze, Pos(head), &gameCamera);
     // The UI screen follows the gaze lazily in first person (xr.h SetUiFollow). 0.11.0: also while the game is paused
     // with the 3D scene still drawn - Heavy Rain pauses itself under its tutorial texts ("For actions requiring timing
     // and precision ...", LIVE 0.10.0: paused=1 with 3D frames, the screen stayed put). Prepare only runs on 3D frames,

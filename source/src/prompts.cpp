@@ -13,6 +13,7 @@
 #include "engineobj.h"
 #include "fpmode.h"
 #include "game.h"
+#include "help_menu.h"
 #include "log.h"
 
 namespace hrvr::prompts {
@@ -27,6 +28,8 @@ std::mutex g_viewMutex;
 struct View {
     bool firstPerson = false;
     pose::Vec3 eye{}, gaze{0, 0, -1}, head{};
+    pose::Vec3 camera{};  // 1.2: the game's own camera (its authored place), for the help menus' size
+    bool haveCamera = false;
     uint64_t ms = 0;
 } g_view;
 std::atomic<void*> g_mparGui{nullptr};
@@ -342,6 +345,161 @@ void HookMparUpdate(void* owner, void* record) {
     }
 }
 
+// ---- 1.2: tutorial / help texts placed in the room (help_menu.h has the data and static evidence) ----
+// In first person, for the draw only: every entry of IHM_MENUS::Display3D whose menu data is a tutorial / help menu
+// (Text_Tuto: "At any time, you can listen to what your character thinks by pressing and holding down" + the button
+// and the controller / keyboard / mouse pictures) gets a matrix in front of the view, facing the eye, at the size it
+// had on the game's own screen; the game's matrix is put back right after the call (render-only: SetAddress wrote it
+// once and nothing else must see the moved one). Blocks the call is about to remove (+0x138 && +0x14C: freed inside
+// it) are never touched.
+using IhmDisplayFn = char* (*)(void* component, void* context, int pass);
+IhmDisplayFn g_origIhmDisplay = nullptr;
+constexpr float kHelpDistance = 0.5f;  // m (1.3, owner: "make the tutorials appear 0.5m away from you"; 1.2 had 1.0)
+constexpr float kHelpDrop = 0.04f;     // m below the eye
+std::atomic<uint64_t> g_wordsMoved{0};
+constexpr size_t kIhmEntries = 0x60, kIhmCount = 0x68, kIhmStride = 0x18;
+constexpr size_t kBlock3D = 0x07, kBlockMatrix = 0x30, kBlockRemove = 0x138, kBlockRemoveFlag = 0x14C;
+constexpr int kMaxHelp = 16;
+std::atomic<uint64_t> g_helpMoved{0};
+
+struct HelpSave {
+    void* block;
+    float m[16];
+};
+
+int MoveHelpMenus(void* component, const View& v, uint64_t now, HelpSave* saved) {
+    uint32_t count = 0;
+    auto* entries = static_cast<const uint8_t*>(obj::Ptr(component, kIhmEntries));
+    if (!entries || !obj::Get(component, kIhmCount, count) || count == 0 || count > 256) return 0;
+    // 1.3: the player's thoughts anchors moved in front this frame (HookSetAnchor's world locks)
+    pose::Vec3 anchors[8];
+    int anchorCount = 0;
+    {
+        std::lock_guard lock(g_slotMutex);
+        for (const Slot& s : g_slots)
+            if (s.animator && s.lock.placed && now - s.lock.lastMs <= 500 && anchorCount < 8) anchors[anchorCount++] = s.lock.pos;
+    }
+    auto dist = [](pose::Vec3 a, pose::Vec3 b) {
+        return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+    };
+    int n = 0;
+    for (uint32_t i = 0; i < count && n < kMaxHelp; ++i) {
+        const uint8_t* entry = entries + size_t(i) * kIhmStride;
+        void* handle = obj::Ptr(entry, 0);
+        void* block = obj::Ptr(entry, 8);
+        uint32_t cls = 0, id = 0;
+        if (!handle || !block || !obj::Get(handle, 0, cls) || !obj::Get(handle, 4, id)) continue;
+        const bool words = helpmenu::IsThoughtWords(cls, id);
+        const char* menu = words ? (id == 0x17 ? "Think_Main" : "Speak_Main") : helpmenu::Name(cls, id);
+        if (!menu) continue;
+        if (words && !anchorCount) continue;  // no player anchor moved: another character's thoughts stay
+        int remove = 0;
+        uint8_t removeFlag = 0, placed3d = 0;
+        if (!obj::Get(block, kBlockRemove, remove) || !obj::Get(block, kBlockRemoveFlag, removeFlag) ||
+            !obj::Get(block, kBlock3D, placed3d))
+            continue;
+        if ((remove != 0 && removeFlag != 0) || !placed3d) continue;
+        float m[16];
+        if (!obj::Bytes(block, kBlockMatrix, m, sizeof(m))) continue;
+        bool finite = true;
+        for (float f : m) finite &= std::isfinite(f);
+        if (!finite) continue;
+        const pose::Vec3 at{m[12], m[13], m[14]};
+        if (words) {
+            // A thought word: flattened into a slab in front of its moved anchor (help_menu.h Flatten), facing the eye,
+            // at the game's own size (the anchor is already 0.9 m ahead, the distance the owner accepted in 0.7.0).
+            int best = -1;
+            float bestD = 1.5f;  // m: the ring's words stay within this of their anchor; other characters' do not
+            for (int k = 0; k < anchorCount; ++k)
+                if (const float d = dist(at, anchors[k]); d < bestD) {
+                    bestD = d;
+                    best = k;
+                }
+            if (best < 0) continue;
+            const pose::Vec3 p = anchors[best];
+            float fx = p.x - v.eye.x, fz = p.z - v.eye.z;
+            const float fl = std::sqrt(fx * fx + fz * fz);
+            if (!(fl > 1e-3f)) continue;
+            fx /= fl;
+            fz /= fl;
+            const float lx = fz, lz = -fx;  // left of the horizontal view-to-anchor direction
+            const float dx = at.x - p.x, dy = at.y - p.y, dz = at.z - p.z;
+            const helpmenu::Flat f = helpmenu::Flatten(dx * lx + dz * lz, dy, dx * fx + dz * fz);
+            const pose::Vec3 to{p.x + lx * f.side + fx * f.depth, p.y + f.up, p.z + lz * f.side + fz * f.depth};
+            float out[16];
+            if (!FaceEye(m, to, v.eye, out)) std::memcpy(out, m, sizeof(out));
+            out[12] = to.x;
+            out[13] = to.y;
+            out[14] = to.z;
+            saved[n].block = block;
+            std::memcpy(saved[n].m, m, sizeof(m));
+            if (!WriteMatrix(block, out)) continue;
+            ++n;
+            const uint64_t moved = g_wordsMoved.fetch_add(1, std::memory_order_relaxed);
+            static uint64_t lastWordLog = 0;
+            if (!moved || now - lastWordLog >= 5000) {
+                lastWordLog = now;
+                Log("PROMPTS thought word (menu %s) laid in front of its anchor: it was %.2f m from it (side %.2f up %.2f "
+                    "depth %.2f) and %.2f m from the eye -> side %.2f up %.2f depth %.2f (%llu draws so far)",
+                    menu, bestD, dx * lx + dz * lz, dy, dx * fx + dz * fz, dist(at, v.eye), f.side, f.up, f.depth,
+                    static_cast<unsigned long long>(moved + 1));
+            }
+            continue;
+        }
+        float yaw;
+        {
+            std::lock_guard lock(g_mparMutex);  // the same lazily following heading as the action prompts
+            if (now - g_mparLockMs >= 8) {
+                g_mparPoint = g_front.Point(v.eye, v.gaze, now);
+                g_mparLockMs = now;
+            }
+            yaw = g_front.yaw;
+        }
+        const pose::Vec3 to{v.eye.x - std::sin(yaw) * kHelpDistance, v.eye.y - kHelpDrop, v.eye.z - std::cos(yaw) * kHelpDistance};
+        const float fromEye = dist(at, v.eye);
+        const float design = v.haveCamera ? dist(at, v.camera) : fromEye;
+        const float s = helpmenu::Scale(design, kHelpDistance);
+        float out[16];
+        if (!FaceEye(m, to, v.eye, out)) std::memcpy(out, m, sizeof(out));
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) out[r * 4 + c] *= s;
+        out[12] = to.x;
+        out[13] = to.y;
+        out[14] = to.z;
+        saved[n].block = block;
+        std::memcpy(saved[n].m, m, sizeof(m));
+        if (!WriteMatrix(block, out)) continue;
+        ++n;
+        const uint64_t moved = g_helpMoved.fetch_add(1, std::memory_order_relaxed);
+        static uint64_t lastLog = 0;
+        if (!moved || now - lastLog >= 5000) {
+            lastLog = now;
+            Log("PROMPTS help text (menu %s) placed %.2f m in front of the view: it was %.2f m from the eye and %.2f m "
+                "from the game camera%s, size x%.2f (%llu draws so far)",
+                menu, kHelpDistance, fromEye, design, v.haveCamera ? "" : " (unknown: eye used)", s,
+                static_cast<unsigned long long>(moved + 1));
+        }
+    }
+    return n;
+}
+
+char* HookIhmDisplay(void* component, void* context, int pass) {
+    HelpSave saved[kMaxHelp];
+    int n = 0;
+    if (g_enabled.load(std::memory_order_relaxed) && component) {
+        View v;
+        {
+            std::lock_guard lock(g_viewMutex);
+            v = g_view;
+        }
+        const uint64_t now = GetTickCount64();
+        if (v.firstPerson && now - v.ms <= 250) n = MoveHelpMenus(component, v, now, saved);
+    }
+    char* r = g_origIhmDisplay(component, context, pass);
+    for (int i = 0; i < n; ++i) WriteMatrix(saved[i].block, saved[i].m);  // the game's own place again
+    return r;
+}
+
 }  // namespace
 
 bool Install() {
@@ -351,6 +509,13 @@ bool Install() {
         Log("PROMPTS hook MPAR::UpdateElement %p %s", m, MH_StatusToString(me));
     } else {
         Log("PROMPTS MPAR element update not found in this build: action prompts stay where the game puts them");
+    }
+    if (void* d = game::Addr(game::Anchor::IhmMenusDisplay)) {
+        const MH_STATUS ds = MH_CreateHook(d, reinterpret_cast<void*>(&HookIhmDisplay), reinterpret_cast<void**>(&g_origIhmDisplay));
+        const MH_STATUS de = ds == MH_OK ? MH_EnableHook(d) : ds;
+        Log("PROMPTS hook IHM_MENUS::Display3D %p %s (tutorial / help texts in front in first person)", d, MH_StatusToString(de));
+    } else {
+        Log("PROMPTS 3D menu draw not found in this build: tutorial texts stay where the game puts them");
     }
     void* p = game::Addr(game::Anchor::ThoughtsSetAnchor);
     if (!p) {
@@ -371,9 +536,16 @@ void SetEnabled(bool on) {
 }
 bool Enabled() { return g_enabled; }
 
-void PublishView(bool firstPerson, const pose::Vec3& eye, const pose::Vec3& gaze, const pose::Vec3& head) {
+void PublishView(bool firstPerson, const pose::Vec3& eye, const pose::Vec3& gaze, const pose::Vec3& head,
+                 const pose::Vec3* gameCamera) {
     std::lock_guard lock(g_viewMutex);
-    g_view = {firstPerson, eye, gaze, head, GetTickCount64()};
+    g_view.firstPerson = firstPerson;
+    g_view.eye = eye;
+    g_view.gaze = gaze;
+    g_view.head = head;
+    g_view.haveCamera = gameCamera && std::isfinite(gameCamera->x) && std::isfinite(gameCamera->y) && std::isfinite(gameCamera->z);
+    g_view.camera = g_view.haveCamera ? *gameCamera : pose::Vec3{};
+    g_view.ms = GetTickCount64();
 }
 
 void SetMparGui(void* gui) {

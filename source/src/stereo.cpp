@@ -100,6 +100,10 @@ uint64_t g_eyeTexGen = 0;    // eye textures re-made (size change): a half-finis
 // where the eyes look reads as a focus fault in VR. The camera's own DoF switch (+0x128) is cleared for the eye passes
 // only and restored after them, so the game's scripts and the flat screen keep theirs.
 bool g_vrDof = false;
+// vr_film_grain=off (default since 1.2; owner 2026-11-22 "remove film grain" - REVERSES the 2026-11-20 "DONT TURN OFF
+// NOISE"): the camera's noise switch (+0x144, read by the same post-effect fill as DoF) is cleared for the eye passes like DoF;
+// since 1.4 also for every other render (HookBuild: the desktop window and flat screens, owner). vr_film_grain=on keeps the game's grain.
+bool g_vrGrain = false;
 
 std::wstring IniPath() {
     wchar_t exe[MAX_PATH];
@@ -802,6 +806,21 @@ void LogLightGather() {
 // ---- hooks ----
 void HookBuild(void* cam, float aspect, float guardX, float guardY) {
     ++g_count.build;
+    // 1.4 (owner 2026-11-22 "remove it from desktop window"): grain off for EVERY render, not only the eye passes.
+    // STATIC VIEWPORT::SetupCamera 0x14089fd10 calls this Build and then, in the same branch, its post-effect fill
+    // camerasystem_1408e4550 (its only caller), which reads the noise switch +0x144 - cleared here it is off for the
+    // headset, the desktop window and every flat screen. The game's scripts may set it again; it is cleared per Build.
+    if (!g_vrGrain && cam) {
+        auto* noise = static_cast<uint8_t*>(cam) + off::CamNoiseEnable;
+        if (*noise) {
+            *noise = 0;
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                Log("STEREO film grain off on every camera: headset, desktop window and flat screens (vr_film_grain=off)");
+            }
+        }
+    }
     const int eye = g_eye;
     const bool stereo = eye >= 0 && IsStereoCam(cam);
     if (eye >= 0 && !stereo && g_smallHead && IsSmallCam(cam)) {
@@ -1333,26 +1352,39 @@ void HookList(void* list, void* a2, void* a3, void* a4) {
     auto setup = reinterpret_cast<SetupCameraFn>(Addr(Anchor::ViewportSetupCamera));
     struct DofSave {
         uint8_t* cam;
-        uint8_t on;
+        uint8_t dof, noise;  // the game's switches before the eye passes
     } dofSaved[2 * kMaxCams];
     int dofCount = 0;
-    if (!g_vrDof) {
+    if (!g_vrDof || !g_vrGrain) {
+        int dofOff = 0, grainOff = 0;
         auto clear = [&](void* camp) {
             auto* cam = static_cast<uint8_t*>(camp);
             if (!cam || dofCount >= 2 * kMaxCams) return;
             for (int i = 0; i < dofCount; ++i)
                 if (dofSaved[i].cam == cam) return;
-            if (const uint8_t on = cam[off::CamDofEnable]) {
-                dofSaved[dofCount++] = {cam, on};
+            const uint8_t dof = cam[off::CamDofEnable], noise = cam[off::CamNoiseEnable];
+            const bool clearDof = !g_vrDof && dof, clearNoise = !g_vrGrain && noise;
+            if (!clearDof && !clearNoise) return;
+            dofSaved[dofCount++] = {cam, dof, noise};
+            if (clearDof) {
                 cam[off::CamDofEnable] = 0;
+                ++dofOff;
+            }
+            if (clearNoise) {
+                cam[off::CamNoiseEnable] = 0;
+                ++grainOff;
             }
         };
         for (int k = 0; k < g_camCount; ++k) clear(g_cams[k]);
         for (int k = 0; k < g_smallCount; ++k) clear(g_smallCams[k]);
-        static bool logged = false;
-        if (dofCount && !logged) {
-            logged = true;
-            Log("STEREO depth of field off in the headset (vr_dof=off): %d camera(s)", dofCount);
+        static bool loggedDof = false, loggedGrain = false;
+        if (dofOff && !loggedDof) {
+            loggedDof = true;
+            Log("STEREO depth of field off in the headset (vr_dof=off): %d camera(s)", dofOff);
+        }
+        if (grainOff && !loggedGrain) {
+            loggedGrain = true;
+            Log("STEREO film grain off in the headset (vr_film_grain=off): %d camera(s)", grainOff);
         }
     }
     bool copied = true;
@@ -1426,7 +1458,10 @@ void HookList(void* list, void* a2, void* a3, void* a4) {
     if (only < 0) NoteDrawPair();
     LogShadowProbe();
     LogLightGather();
-    for (int i = 0; i < dofCount; ++i) dofSaved[i].cam[off::CamDofEnable] = dofSaved[i].on;
+    for (int i = 0; i < dofCount; ++i) {
+        dofSaved[i].cam[off::CamDofEnable] = dofSaved[i].dof;
+        dofSaved[i].cam[off::CamNoiseEnable] = dofSaved[i].noise;
+    }
     ++g_pairs;
     g_lastStereoMs = GetTickCount64();
     if (!copied) {
@@ -1791,6 +1826,7 @@ bool Install() {
     }
     xr::SetMono(g_method == kMono);
     g_vrDof = IniOn(L"vr_dof", false);
+    g_vrGrain = IniOn(L"vr_film_grain", false);
     const float scale = float(_wtof(IniString(L"world_scale", L"1.0").c_str()));
     g_worldScale = scale > 0.001f && scale < 1000.f ? scale : 1.f;
     xr::SetSymmetricFov(IniOn(L"symfov", true));

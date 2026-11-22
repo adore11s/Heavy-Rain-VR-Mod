@@ -73,6 +73,9 @@ enum class Anchor {
     // 0.36.15 (STATIC 2026-11-20): renderer start-up - user_setting.ini into the display globals (g::ConfigScreenMode);
     // the caller 0x140a716e0 then copies the configured mode into the current one before the window exists.
     LoadDisplaySettings,
+    // 1.2 (STATIC 2026-11-22): the 3D-placed MenusMaster menus' draw in the viewport pass (rcx = display component:
+    // +0x60 entries of 0x18 = menu-data handle, param block; +0x68 count). Param block +7 = 3D, +0x30 world matrix.
+    IhmMenusDisplay,
     Count
 };
 
@@ -140,6 +143,9 @@ constexpr uintptr_t CamGuardY = 0x124;
 // VIEWPORT::SetupCamera's post-effect fill (camerasystem_1408e4550: DoF params[0] = +0x128 && !options+0x12) and
 // by the viewport pass (camerasystem_1408a15e0: the DoF pass flag 0x141a1eff0). +0x12C..+0x140 focus parameters.
 constexpr uintptr_t CamDofEnable = 0x128;
+// bool: film grain / viewport noise on. Read by the same post-effect fill (camerasystem_1408e4550: noise on =
+// +0x144 && !options+0x13; +0x148 / +0x14C / +0x150 its parameters, +0x154 its rate as 1 / x).
+constexpr uintptr_t CamNoiseEnable = 0x144;
 constexpr uintptr_t CamProj = 0x200;     // row-major, RH, row-vector, p[11] = -1
 constexpr uintptr_t CamView = 0x240;     // inverse(node world)
 constexpr uintptr_t CamProjFar = 0x2A0;

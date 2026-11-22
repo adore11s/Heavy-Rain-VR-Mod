@@ -42,6 +42,7 @@
 {SigKind::Code, "PARTICLE_VB::Next", 0x1408ab530ull, "48 83 EC 28 FF 81 84 00 00 00 48 8B D1 44 8B 81 84 00 00 00", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LIGHT_GATHER", 0x140a0d160ull, "40 55 56 41 55 41 57 48 8D AC 24 28 FB FF FF 48 81 EC D8 05 00 00", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "RENDER::LoadDisplaySettings", 0x140a70cc0ull, "48 83 EC 78 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 E8 ?? ?? ?? ??", 0, 0, 0, 0x0ull, ""},
+{SigKind::Code, "IHM_MENUS::Display3D", 0x14087b8f0ull, "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 F8 FD FF FF", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LUA::index2adr", 0x140bbd180ull, "85 D2 7E 1F 8D 42 FF 48 98 48 C1 E0 04 48 03 41 18", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LUA::next", 0x140bbd240ull, "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? 8B D3 48 8B CF E8 ?? ?? ?? ?? 4C 8B 47 10 48 8B CF 49 83 E8 10", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LUA::type", 0x140bbd8f0ull, "48 83 EC 28 E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 48 3B C1 75 08", 0, 0, 0, 0x0ull, ""},

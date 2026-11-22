@@ -22,8 +22,10 @@ void SetEnabled(bool on);
 // First person: every action prompt in front of the view (true, fp_prompts_front=all) or only the player's own.
 void SetAllFront(bool on);
 bool Enabled();
-// fpcam, every first-person frame (render thread): the view and the player's head bone.
-void PublishView(bool firstPerson, const pose::Vec3& eye, const pose::Vec3& gaze, const pose::Vec3& head);
+// fpcam, every first-person frame (render thread): the view, the player's head bone and the game's own camera place
+// (nullptr when unknown; 1.2: the tutorial / help texts keep the size they had on the game's screen).
+void PublishView(bool firstPerson, const pose::Vec3& eye, const pose::Vec3& gaze, const pose::Vec3& head,
+                 const pose::Vec3* gameCamera = nullptr);
 // The MPAR_GUI singleton found by the player scan (nullptr when unknown).
 void SetMparGui(void* gui);
 // Action prompts are on offer now (right stick = the game's).

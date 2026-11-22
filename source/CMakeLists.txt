@@ -169,6 +169,10 @@ add_executable(fp_math_tests tests/fp_math_tests.cpp)
 target_compile_options(fp_math_tests PRIVATE /W4 /permissive-)
 add_test(NAME fp_math_tests COMMAND fp_math_tests)
 
+add_executable(help_menu_tests tests/help_menu_tests.cpp)
+target_compile_options(help_menu_tests PRIVATE /W4 /permissive-)
+add_test(NAME help_menu_tests COMMAND help_menu_tests)
+
 add_executable(fpbody_tests tests/fpbody_tests.cpp)
 target_include_directories(fpbody_tests PRIVATE src)
 target_compile_options(fpbody_tests PRIVATE /W4 /permissive-)
