@@ -44,6 +44,7 @@ constexpr AnchorDef kAnchors[] = {
     {"IHM_MENUS::Display3D", 0x14087b8f0},
     {"USER_ACTION::Activate", 0x14023d180},
     {"MPAR_AXIS_ROTATION::Check", 0x14045df90},
+    {"MENUS_MASTER::Draw2D", 0x140835540},
 };
 static_assert(sizeof(kAnchors) / sizeof(kAnchors[0]) == size_t(Anchor::Count));
 

@@ -45,6 +45,7 @@
 {SigKind::Code, "IHM_MENUS::Display3D", 0x14087b8f0ull, "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 F8 FD FF FF", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "USER_ACTION::Activate", 0x14023d180ull, "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 81 EC C0 00 00 00", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "MPAR_AXIS_ROTATION::Check", 0x14045df90ull, "48 8B C4 48 89 58 08 57 48 81 EC D0 00 00 00 0F 29 70 E8 48 8B D9", 0, 0, 0, 0x0ull, ""},
+{SigKind::Code, "MENUS_MASTER::Draw2D", 0x140835540ull, "48 89 4C 24 08 53 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 88 00 00 00", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LUA::index2adr", 0x140bbd180ull, "85 D2 7E 1F 8D 42 FF 48 98 48 C1 E0 04 48 03 41 18", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LUA::next", 0x140bbd240ull, "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 E8 ?? ?? ?? ?? 8B D3 48 8B CF E8 ?? ?? ?? ?? 4C 8B 47 10 48 8B CF 49 83 E8 10", 0, 0, 0, 0x0ull, ""},
 {SigKind::Code, "LUA::type", 0x140bbd8f0ull, "48 83 EC 28 E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 48 3B C1 75 08", 0, 0, 0, 0x0ull, ""},

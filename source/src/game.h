@@ -81,6 +81,11 @@ enum class Anchor {
     // semicircle element's per-frame check (vtable +0x2A8, rcx element: reads +0x234..+0x240; 0 / 1 fail / 2 success).
     UserActionActivate,
     AxisRotationCheck,
+    // v1.3.1 (STATIC 2026-11-24): MenusMaster's 2D menu draw - the task method (MenusMaster +0x128 task, priority 0x35,
+    // right after the frame display task 0x140870a50 at 0x34) that draws every 2D menu block (+3 && +4, +7 == 0, +5) of
+    // the master list (+0x230 x 0x10, count +0x238; rcx = the master *0x141a33a38) straight into the swap chain's colour
+    // target: subtitles, 2D HUD menus. It runs after the UI capture, so its pictures reached only the desktop window.
+    MenusMasterDraw2D,
     Count
 };
 

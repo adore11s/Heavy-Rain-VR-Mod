@@ -1166,6 +1166,51 @@ void DrawDeferred2D() {
     g_deferred2D.clear();
 }
 
+// ---- v1.3.1: MenusMaster's 2D menus (subtitles) into the headset's UI ----
+// STATIC 2026-11-24 (HRVR v1.3.1): the subtitle (menu data 0x32c9:0xE) and every other 2D MenusMaster menu block
+// are drawn by the master's 2D task 0x140835540 (task priority 0x35) straight into the swap chain's colour target - one
+// step AFTER the frame display task (0x34: eye renders, UI capture, DISPLAY_WINDOW). So they reached only the desktop
+// window. With ui=panel the mod now runs that draw itself inside the UI capture (right after the held-back 2D layers,
+// over transparent black; RGB-only writes, the panel's brightness alpha keeps the text) and skips the game's own call of
+// the same frame (no double draw on the desktop, which shows the UI capture anyway). hrvr.ini vr_subtitles (on).
+using MenusDraw2DFn = void* (*)(void* master);
+MenusDraw2DFn g_origMenus2D = nullptr;
+std::atomic<void*> g_menusMaster{nullptr};
+bool g_menus2DInUi = true;     // hrvr.ini vr_subtitles
+bool g_menus2DDrawn = false;   // drawn into this frame's UI capture: the game's late call is skipped (render thread)
+uint64_t g_menus2DEarly = 0, g_menus2DSkipped = 0, g_menus2DGame = 0;
+
+void* HookMenus2D(void* master) {
+    if (master) g_menusMaster.store(master, std::memory_order_relaxed);
+    if (g_menus2DDrawn) {
+        g_menus2DDrawn = false;
+        ++g_menus2DSkipped;
+        return master;
+    }
+    ++g_menus2DGame;
+    return g_origMenus2D(master);
+}
+
+void DrawMenus2DIntoUi() {
+    void* master = g_menusMaster.load(std::memory_order_relaxed);
+    if (!g_menus2DInUi || !g_origMenus2D || !master) return;
+    auto setViewport = reinterpret_cast<SetViewportFn>(Addr(Anchor::RenderSetViewport));
+    const uint32_t w = *Global<uint32_t>(g::RenderWidth), h = *Global<uint32_t>(g::RenderHeight);
+    if (setViewport) setViewport(Global<void>(g::RenderContext), 0, 0, w, h);
+    g_origMenus2D(master);
+    g_menus2DDrawn = true;
+    ++g_menus2DEarly;
+    static uint64_t last = 0;
+    const uint64_t now = GetTickCount64();
+    if (!last || now - last >= 10000) {
+        Log("STEREO 2D menus (subtitles) drawn into the UI capture: %llu frames, the game's late draw skipped %llu, "
+            "drawn by the game (desktop only) %llu, master %p (vr_subtitles=on)",
+            static_cast<unsigned long long>(g_menus2DEarly), static_cast<unsigned long long>(g_menus2DSkipped),
+            static_cast<unsigned long long>(g_menus2DGame), master);
+        last = now;
+    }
+}
+
 void GateReport() {
     using namespace harness;
     const double mb = Median(g_gate.b), mc = Median(g_gate.c), md = Median(g_gate.d);
@@ -1558,6 +1603,7 @@ void HookList(void* list, void* a2, void* a3, void* a4) {
         // drawn by DISPLAY_WINDOW::Display after we return); HookWindow lifts it onto the panel.
         if (ID3D11Texture2D* bb = SceneTarget()) xr::OnUiBegin(slot, g_ctx, bb);
         DrawDeferred2D();
+        DrawMenus2DIntoUi();  // v1.3.1: subtitles / 2D HUD menus (otherwise drawn after the capture, desktop only)
         g_pendingUiSlot = slot;
     } else {
         DrawDeferred2D();
@@ -1814,6 +1860,7 @@ void HookPresent(void* a1, uint64_t sync, void* a3, void* a4) {
         std::unique_lock lock(g_lock);
         ++g_count.present;
         ++g_frame;
+        g_menus2DDrawn = false;  // v1.3.1: a UI-capture draw the game's 2D menu task did not consume ends with the frame
         if (!g_sc) {
             FirstPresent();
             Log("CANARY first Present hooked in stage=%s: the mod's code runs inside the game's frame", StageName(g_stage));
@@ -1949,6 +1996,17 @@ bool Install() {
               reinterpret_cast<void**>(&g_origParticleVb), "PARTICLE_VB::Next"))
         Log("STEREO particle buffer hook missing: two renders of a particle-heavy room can reach the game's abort()");
     if (!ok) Log("STEREO a render hook failed: the mod stays off");
+    // v1.3.1: subtitles / 2D HUD menus into the headset's UI panel (missing anchor: they stay desktop only, logged).
+    if (ok && g_stage == Stage::Vr) {
+        g_menus2DInUi = IniOn(L"vr_subtitles", true);
+        if (!g_uiPanel)
+            Log("STEREO subtitles: ui=eyes has no UI capture - 2D menus (subtitles) stay on the desktop window only");
+        else if (!Hook(Addr(Anchor::MenusMasterDraw2D), reinterpret_cast<void*>(&HookMenus2D),
+                       reinterpret_cast<void**>(&g_origMenus2D), "MENUS_MASTER::Draw2D"))
+            Log("STEREO subtitles: 2D menu draw not found in this build - subtitles stay on the desktop window only");
+        else
+            Log("STEREO subtitles / 2D menus into the UI panel %s (vr_subtitles)", g_menus2DInUi ? "on" : "off");
+    }
     // First person writes nothing outside the eye passes, but its hooks only belong in the stereo stage
     // (observe stays read-only).
     if (ok && g_stage == Stage::Vr) {
