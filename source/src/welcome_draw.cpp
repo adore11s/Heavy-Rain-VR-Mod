@@ -201,11 +201,15 @@ void WelcomeDraw(int page, bool hover) {
             y += 40.f;
             WText(L"Note: the mod is still a work in progress.", y, 32.f, DWRITE_FONT_WEIGHT_NORMAL, dim);
         } else if (page == 1) {
-            y += 50.f;
+            // playbook rev 40 (owner 2026-11-24, GoW D-337): a second supporter on its own line under ZarDomain, with a
+            // snowflake; both names 84 -> 64 px and the gaps 20 / 30 so both fit above the bubble. A new supporter never
+            // raises kWelcomeVersion (players who saw the windows are not shown them again).
+            y += 20.f;
             y += WText(L"A special shoutout to the person who contributed\nto help me make more great VR mods.\n"
                        L"Thank you very much! \U0001F64F", y, 38.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, body);
-            y += 40.f;
-            WText(L"ZarDomain \U0001F4AA", y, 84.f, DWRITE_FONT_WEIGHT_BOLD, white);
+            y += 30.f;
+            y += WText(L"ZarDomain \U0001F4AA", y, 64.f, DWRITE_FONT_WEIGHT_BOLD, white);
+            WText(L"YouGotColdYogurt \x2744\xFE0F", y, 64.f, DWRITE_FONT_WEIGHT_BOLD, white);
         } else {
             y += WText(L"In the game's Options menu you'll find the VR panel,\nwhere you can tinker with lots of settings\n"
                        L"(first person, motion controls and more).", y, 33.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, body);

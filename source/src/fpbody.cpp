@@ -23,6 +23,8 @@
 #include "item_seam.h"
 #include "movie_item.h"
 #include "movielink.h"
+#include "ari.h"
+#include "ari_gesture.h"
 #include "rigmap.h"
 #include "game.h"
 #include "log.h"
@@ -2136,8 +2138,99 @@ uint64_t SeamVtable(void* node) {
     return obj::Get(node, 0, v) ? v : 0;
 }
 
+// 1.6.4 (owner 2026-11-24: "i dont see the glasses in my hands when i grab"): while the ARI glasses gesture holds them
+// (ari::GlassesHand, F1 + motion controls), the glasses object - found among the objects of the movies playing with the
+// player by name (*ARIglass* / *LunetteARI*, docs/ARI_GESTURE.md) - is drawn at that controller: 6 cm ahead of the
+// grip point, turned with the hand from the grab on (take off: as they sat on the face; put on: as the last take off
+// held them). Render-only through the item seam, as every held object; the game's own clip takes over on success.
+std::atomic<void*> g_glassesNode{nullptr};
+std::mutex g_glassesMutex;
+Mat4 g_glassesWant = pose::Identity();  // the drawn world while held (game thread writes, draw reads)
+Mat4 g_glassesRel = pose::Identity();   // rotation relative to the hand from the grab
+Mat4 g_takeOffRel = pose::Identity();
+bool g_haveTakeOffRel = false;
+int g_glassesHeldBy = -1;
+std::atomic<uint64_t> g_glassesAnswers{0};
+
+bool GlassesName(const char* n) {
+    char low[64] = {};
+    for (int i = 0; i < 63 && n[i]; ++i) low[i] = char(n[i] >= 'A' && n[i] <= 'Z' ? n[i] + 32 : n[i]);
+    return std::strstr(low, "ariglass") || std::strstr(low, "lunetteari");
+}
+
+void UpdateGlasses(const Plan& plan) {
+    int kind = 0;
+    const int hand = ari::GlassesHand(&kind);
+    if (hand < 0 || hand > 1 || !plan.active || !plan.handValid[hand] || !plan.node) {
+        if (g_glassesHeldBy >= 0)
+            Log("FPITEM ARI glasses: back to the game (%llu drawn answers at the hand)",
+                static_cast<unsigned long long>(g_glassesAnswers.exchange(0)));
+        g_glassesNode = nullptr;
+        g_glassesHeldBy = -1;
+        return;
+    }
+    const Mat4& grip = plan.grip[hand];
+    if (g_glassesHeldBy != hand) {  // a new grab: find the glasses, keep their turn against the hand
+        g_glassesHeldBy = hand;
+        g_glassesNode = nullptr;
+        movielink::LinkedObject list[24];
+        const int n = movielink::ListLinked(plan.node, list, 24);
+        void* node = nullptr;
+        const char* name = "";
+        for (int i = 0; i < n && !node; ++i)
+            if (list[i].node && GlassesName(list[i].entity)) node = list[i].node, name = list[i].entity;
+        if (!node) {
+            std::string names;
+            for (int i = 0; i < n; ++i) names += std::string(i ? ", " : "") + list[i].entity;
+            Log("FPITEM ARI glasses: NOT among the objects of the movies playing with the player (%d: %s) - not drawn "
+                "in the hand", n, names.c_str());
+            return;
+        }
+        Mat4 world, gripInv;
+        if (!obj::Bytes(node, kNodeWorld, world.m, sizeof(world.m)) || !Finite(world.m) ||
+            !AffineInverse(RotationOf(grip), &gripInv))
+            return;
+        const Mat4 rel = pose::Mul(RotationOf(world), gripInv);
+        {
+            std::lock_guard lock(g_glassesMutex);
+            if (kind == int(ari::Kind::Off) || !g_haveTakeOffRel) g_glassesRel = rel;
+            else g_glassesRel = g_takeOffRel;
+            if (kind == int(ari::Kind::Off)) g_takeOffRel = rel, g_haveTakeOffRel = true;
+        }
+        g_glassesNode = node;
+        Log("FPITEM ARI glasses \"%s\" (node %p) drawn in the %s controller hand while the gesture holds them (%s)", name,
+            node, hand == 0 ? "left" : "right", kind == int(ari::Kind::Off) ? "take off" : "put on");
+    }
+    if (!g_glassesNode.load()) return;
+    std::lock_guard lock(g_glassesMutex);
+    Mat4 want = pose::Mul(g_glassesRel, RotationOf(grip));
+    want.m[12] = grip.m[12] - grip.m[8] * 0.06f;
+    want.m[13] = grip.m[13] - grip.m[9] * 0.06f;
+    want.m[14] = grip.m[14] - grip.m[10] * 0.06f;
+    g_glassesWant = want;
+}
+
+// The parent matrix that puts the glasses at the hand: local x parent = want -> parent = inverse(local) x want.
+const float* GlassesAnswer(void* node, const float* r) {
+    alignas(16) static thread_local float answer[16];
+    Mat4 local, inv;
+    if (!obj::Bytes(node, kNodeLocal, local.m, sizeof(local.m)) || !Finite(local.m) || !AffineInverse(local, &inv))
+        return r;
+    Mat4 want;
+    {
+        std::lock_guard lock(g_glassesMutex);
+        want = g_glassesWant;
+    }
+    const Mat4 p = pose::Mul(inv, want);
+    if (!Finite(p.m)) return r;
+    std::memcpy(answer, p.m, sizeof(answer));
+    g_glassesAnswers.fetch_add(1, std::memory_order_relaxed);
+    return answer;
+}
+
 // No state, cheap: could ItemAnswer move this node? (ItemAnswer's and LooseAnswer's own first tests.)
 bool ItemCandidate(void* node, const float* r) {
+    if (node && node == g_glassesNode.load(std::memory_order_relaxed)) return true;  // 1.6.4
     void* skeleton = g_skeleton.load(std::memory_order_relaxed);
     if (!skeleton) return false;
     const float* base = static_cast<const float*>(obj::Ptr(skeleton, kSkelWorlds));
@@ -2185,7 +2278,7 @@ const float* HookParentMatrix(void* node) {
         break;
     }
     if (who == itemseam::Caller::Update && g_seam.Drawing()) g_seam.Asked(node);
-    const float* a = ItemAnswer(node, r);
+    const float* a = node == g_glassesNode.load(std::memory_order_relaxed) ? GlassesAnswer(node, r) : ItemAnswer(node, r);
     if (a != r && g_seam.On()) {
         if (who == itemseam::Caller::Update) {
             g_seam.Answered(node);
@@ -2774,6 +2867,7 @@ void Publish(const Plan& plan) {
     static uint64_t last = 0, prev[8] = {};
     const uint64_t now = GetTickCount64();
     SampleLinked(plan, now);
+    UpdateGlasses(plan);  // 1.6.4: ARI glasses in the controller hand
     if (!plan.active || now - last < 10000) return;
     last = now;
     if (g_linkNear) {

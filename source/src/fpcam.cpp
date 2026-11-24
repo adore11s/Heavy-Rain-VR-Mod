@@ -1,8 +1,11 @@
 #include "fpcam.h"
 
+#include "ari.h"
+
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +21,7 @@
 #include "fpbody_math.h"
 #include "fpmode.h"
 #include "game.h"
+#include "f3_comfort.h"
 #include "hotkeys.h"
 #include "log.h"
 #include "player.h"
@@ -39,6 +43,13 @@ hotkeys::Edge g_f1Key, g_f3Key;
 // 7 cm up on its rig (6 cm / 0 put the view at the back of the skull). fp_eye_fwd / fp_eye_up.
 float g_eyeForward = 0.17f, g_eyeUp = 0.07f;  // 0.7.0: 8 cm further forward (owner)
 float g_f3EyeForward = 0.f;  // 0.36.6: F3 view between the eye bones, moved this far along the view (fp_f3_eye_fwd)
+// 1.7.1 (owner: F3 "too precise ... making me motion sick ... capturing every yaw movement"): f3_comfort.h - the view's
+// heading follows the TORSO lazily (fp_f3_follow=torso | face), the animated pitch is kept out (fp_f3_pitch=off,
+// playbook 13.2), the eye point is softened. Desk (8 real cutscene clips): 16.4 -> 4.5 deg/s turning by itself.
+bool g_f3FollowFace = false, g_f3Pitch = false;
+f3::Follow g_f3Follow;
+f3::Params g_f3Params;
+uint64_t g_f3Frames = 0, g_f3TorsoFrames = 0, g_f3LastLog = 0;
 bool g_f3FromEyes = false;   // the last F3 view came from the eye bones
 bool g_snapTurn = false;
 float g_snapStep = 0.78539816f;  // 45 deg
@@ -105,6 +116,7 @@ bool g_baseValid = false;
 float g_viewYaw = 0.f, g_viewPitch = 0.f;
 fp::SnapTurn g_snap;
 fp::Mode g_lastMode = fp::Mode::Cinematic;
+std::atomic<uint64_t> g_f1ViewMs{0};  // 1.6: last F1 frame (GetTickCount64)
 fp::BehaviourClass g_lastKind = fp::BehaviourClass::Unknown;
 uint64_t g_lastAnchor = 0;
 LARGE_INTEGER g_qpcFreq{}, g_qpcLast{};
@@ -137,6 +149,11 @@ void ReadSettings() {
     g_f3 = on(L"fpcutscenes", false);
     g_eyeForward = number(L"fp_eye_fwd", g_eyeForward, -0.3f, 0.4f);
     g_f3EyeForward = number(L"fp_f3_eye_fwd", g_f3EyeForward, -0.1f, 0.2f);
+    // 1.7.2 (owner: the car - "saw the body from behind"; "only like ... that the camera doesnt go up and down"): the face
+    // heading as 1.7 by default, the lazy torso follow only on request; never an eye low-pass (f3_comfort.h).
+    g_f3FollowFace = _wcsicmp(text(L"fp_f3_follow", L"face").c_str(), L"torso") != 0;
+    g_f3Params = g_f3FollowFace ? f3::Params{} : f3::TorsoParams();
+    g_f3Pitch = on(L"fp_f3_pitch", false);                                              // 1.7.1: playbook 13.2
     g_eyeUp = number(L"fp_eye_up", g_eyeUp, -0.3f, 0.4f);
     g_snapTurn = _wcsicmp(text(L"turn", L"smooth").c_str(), L"snap") == 0;
     g_snapStep = number(L"snap_turn_degrees", 45.f, 10.f, 90.f) * 0.017453293f;
@@ -283,6 +300,7 @@ void Install() {
     const bool director = camdirector::Install();
     fpbody::Install();
     prompts::Install();
+    ari::Install();  // 1.6: ARI glasses by hand (F1 + motion controls)
     g_ready = game::Va(game::vt::Character) && game::Va(game::vt::ThirdPersonGameplay) &&
               game::Addr(game::Anchor::NodeUpdateWorld);
     QueryPerformanceFrequency(&g_qpcFreq);
@@ -446,7 +464,10 @@ void Prepare(void* cameraNode, const pose::Mat4& authored, const xr::FrameInput&
             // F1: the right stick turns the view, except while action prompts are on offer (the stick does
             // the game's gestures then, B2S 7E); snap must be re-armed after them.
             const auto& right = input.hand[1];
-            if (right.active && !promptsShowing) {
+            // 1.7.1 (owner: "near a prompt of any kind, it disables my rotations"): only the side a prompt on offer could
+            // take is held back, and beside right-stick prompts a turn is a sideways push (turn_gate.h). 1.6.2 paused
+            // every turn while any right-stick prompt was on offer.
+            if (right.active && prompts::TurnAllowed(right.stick[0], right.stick[1])) {
                 if (!g_snapTurn) {
                     if (std::fabs(right.stick[0]) > 0.25f) g_viewYaw -= right.stick[0] * 2.0943951f * g_turnSpeed * dt;  // 120 deg/s
                 } else if (const int step = g_snap.Step(right.stick[0], dt)) {
@@ -478,27 +499,51 @@ void Prepare(void* cameraNode, const pose::Mat4& authored, const xr::FrameInput&
             }
             g_base = next;
         } else {
-            // F3: the view on the head, facing where the face points, pitched by the face against the rig's
-            // level, both smoothed (tau 0.15 s) so animation twitches do not shake the view.
+            // F3: the view on the head (f3_comfort.h). 1.7.2 (owner: in a car "saw the body from behind"; "only like ...
+            // that the camera doesnt go up and down"): the heading follows the face as in 1.7 (tau 0.15 s), the eye is the
+            // animation's own (1.7.1's eye low-pass trailed a moving car by metres), the animated pitch only with
+            // fp_f3_pitch (default off: level). fp_f3_follow=torso: 1.7.1's lazy follow of the shoulder line.
             float yaw = face ? faceYaw : bodyYaw;
-            float pitch = face ? std::clamp(faceElev - level, -1.25f, 1.25f) : 0.f;
-            const float t = 1.f - std::exp(-dt / 0.15f);
-            g_viewYaw = entering ? yaw : fp::ApproachAngle(g_viewYaw, yaw, t);
-            g_viewPitch = entering ? pitch : g_viewPitch + (pitch - g_viewPitch) * t;
+            pose::Mat4 la{}, ra{};
+            if (!g_f3FollowFace && BoneAt(g_rig.lArm, &la) && BoneAt(g_rig.rArm, &ra)) {
+                const float sx = ra.m[12] - la.m[12], sz = ra.m[14] - la.m[14];
+                if (sx * sx + sz * sz > 0.01f) {
+                    float torso = std::atan2(-sz, sx);
+                    const float ref = face ? faceYaw : (entering ? bodyYaw : g_f3Follow.Yaw());
+                    if (std::fabs(std::remainder(torso - ref, kTwoPi)) > 1.5707963f) torso = std::remainder(torso + 3.1415927f, kTwoPi);
+                    yaw = torso;
+                    ++g_f3TorsoFrames;
+                }
+            }
+            const float pitch = face ? std::clamp(faceElev - level, -1.25f, 1.25f) : 0.f;
             // 0.36.6 (owner: "the view goes bit too much high ... not real from ... eyes ... on face"; offline on the
             // live dumps: head + 7 cm world-up + 17 cm ahead sat up to 9 cm ABOVE and ~8 cm in front of the real eyes
             // whenever the head tipped forward, because both offsets ignore the head's own tilt): the view sits between
             // the rig's two eye bones, which move with the skull - every rig the player can be has them. Rigs without
             // them keep the old offsets. fp_f3_eye_fwd (default 0) moves it along the view.
             pose::Mat4 le{}, re{};
-            if (BoneAt(g_rig.lEye, &le) && BoneAt(g_rig.rEye, &re)) {
-                pose::Mat4 mid = head;
-                for (int i = 12; i < 15; ++i) mid.m[i] = 0.5f * (le.m[i] + re.m[i]);
-                g_base = fp::PitchedBase(fp::FirstPersonBase(mid, g_viewYaw, g_f3EyeForward, 0.f), g_viewYaw, g_viewPitch);
-                g_f3FromEyes = true;
-            } else {
-                g_base = fp::PitchedBase(fp::FirstPersonBase(head, g_viewYaw, g_eyeForward, g_eyeUp), g_viewYaw, g_viewPitch);
-                g_f3FromEyes = false;
+            const bool eyes = BoneAt(g_rig.lEye, &le) && BoneAt(g_rig.rEye, &re);
+            pose::Mat4 at = head;
+            if (eyes)
+                for (int i = 12; i < 15; ++i) at.m[i] = 0.5f * (le.m[i] + re.m[i]);
+            const float eyePos[3] = {at.m[12], at.m[13], at.m[14]};
+            if (entering)
+                g_f3Follow.Reset(yaw, g_f3Pitch ? pitch : 0.f, eyePos);
+            else
+                g_f3Follow.Update(yaw, pitch, eyePos, dt, g_f3Pitch, g_f3Params);
+            g_viewYaw = g_f3Follow.Yaw();
+            g_viewPitch = g_f3Follow.Pitch();
+            for (int i = 0; i < 3; ++i) at.m[12 + i] = g_f3Follow.Eye()[i];
+            g_base = eyes ? fp::PitchedBase(fp::FirstPersonBase(at, g_viewYaw, g_f3EyeForward, 0.f), g_viewYaw, g_viewPitch)
+                          : fp::PitchedBase(fp::FirstPersonBase(at, g_viewYaw, g_eyeForward, g_eyeUp), g_viewYaw, g_viewPitch);
+            g_f3FromEyes = eyes;
+            if (++g_f3Frames == 1 || now - g_f3LastLog >= 30000) {
+                g_f3LastLog = now;
+                Log("FP F3 comfort: heading follows the %s (%llu of %llu frames from the shoulders), dead zone %.0f deg, "
+                    "tau %.2f s, animated pitch %s",
+                    g_f3FollowFace ? "face (fp_f3_follow=face)" : "torso", static_cast<unsigned long long>(g_f3TorsoFrames),
+                    static_cast<unsigned long long>(g_f3Frames), g_f3Params.deadzone * 57.29578f, g_f3Params.tau,
+                    g_f3Pitch ? "on (fp_f3_pitch)" : "off");
             }
         }
         g_lastAnchor = now;
@@ -514,6 +559,7 @@ void Prepare(void* cameraNode, const pose::Mat4& authored, const xr::FrameInput&
     const pose::Vec3 gaze = fp::Norm(pose::Vec3{-headWorld.m[8], -headWorld.m[9], -headWorld.m[10]});
     const pose::Vec3 gameCamera{authored.m[12], authored.m[13], authored.m[14]};
     prompts::PublishView(true, Pos(headWorld), gaze, Pos(head), &gameCamera);
+    if (kind == fp::BehaviourClass::Gameplay) g_f1ViewMs = now;  // 1.6: F1ViewNow (ari.cpp)
     // The UI screen follows the gaze lazily in first person (xr.h SetUiFollow). 0.11.0: also while the game is paused
     // with the 3D scene still drawn - Heavy Rain pauses itself under its tutorial texts ("For actions requiring timing
     // and precision ...", LIVE 0.10.0: paused=1 with 3D frames, the screen stayed put). Prepare only runs on 3D frames,
@@ -525,7 +571,7 @@ void Prepare(void* cameraNode, const pose::Mat4& authored, const xr::FrameInput&
         // The game turns the stick by its camera (CtrlMode 0 CAMERA_RELATIVE) or by the character
         // (1 ROOT_CHARACTER_RELATIVE, 2 CHARACTER_RELATIVE): rotate it from the headset's heading into that frame.
         const float reference = st.ctrlMode == 0 ? fp::YawOf(authored) : bodyYaw;
-        vrinput::SetFirstPersonMove({true, std::remainder(fp::YawOf(headWorld) - reference, kTwoPi), g_autoWalk && !promptsShowing});
+        vrinput::SetFirstPersonMove({true, std::remainder(fp::YawOf(headWorld) - reference, kTwoPi), g_autoWalk && !prompts::StickPromptShowing(0)});
     } else {
         vrinput::SetFirstPersonMove({});
     }
@@ -780,6 +826,16 @@ bool Command(const char* verb, const char* arg) {
         return true;
     }
     return false;
+}
+
+bool F1ViewNow() {
+    const uint64_t t = g_f1ViewMs.load();
+    return t && GetTickCount64() - t < 250;
+}
+
+void WristOffsets(float* pitchRad, float* backM) {
+    *pitchRad = g_wristPitch;
+    *backM = g_wristBack;
 }
 
 bool GameplayFP() {

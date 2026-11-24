@@ -12,7 +12,9 @@ namespace hrvr::panel {
 // pitch, 128 px, more than V6's 1434) at 1.2 m wide (1.8744 m high), 0.15 m right of the game screen.
 // 0.36.12 (owner): one more row, "Hide head (first person)" after Motion controls: 1000 x 1690 px (2.028 m high), the
 // same canvas as Beyond's eleven-row V6.
-constexpr int kWidthPx = 1000, kHeightPx = 1690;
+// 1.5 (owner 2026-11-24): one more row, "Yellow filter" (the game's colour gamma, live) before VR on / off: 1000 x 1818 px
+// (2.1816 m high).
+constexpr int kWidthPx = 1000, kHeightPx = 1818;
 // The three-choice row (Rendering method: Native | AFR | Mono): x 40, 360, 680, 280 px wide (gaps 40).
 constexpr int kThreeX[3] = {40, 360, 680};
 constexpr int kThreeW = 280;

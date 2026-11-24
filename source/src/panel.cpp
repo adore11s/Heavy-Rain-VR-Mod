@@ -36,7 +36,8 @@ const float kPushes[] = {0.f, 0.25f, 0.5f, 0.75f, 1.f, 1.25f, 1.5f, 1.75f, 2.f, 
 
 enum Action {
     kNone, kF1On, kF1Off, kF3On, kF3Off, kMotionOn, kMotionOff, kTurnSmooth, kTurnSnap, kStepDown, kStepUp,
-    kPadXbox, kPadPs, kSizeDown, kSizeUp, kNative, kAfr, kMono, kVrOn, kVrOff, kPushDown, kPushUp, kHeadOn, kHeadOff
+    kPadXbox, kPadPs, kSizeDown, kSizeUp, kNative, kAfr, kMono, kVrOn, kVrOff, kPushDown, kPushUp, kHeadOn, kHeadOff,
+    kYellowOn, kYellowOff
 };
 struct Button {
     RECT r;
@@ -55,7 +56,7 @@ uint32_t g_out[kW * kH];
 uint32_t g_cursor[kCursorPx * kCursorPx];
 bool g_cursorMade = false;
 
-Button g_buttons[24];
+Button g_buttons[32];
 int g_nButtons = 0;
 Action g_hover = kNone;
 bool g_needDraw = true;
@@ -82,6 +83,8 @@ void Apply(Action a) {
         case kMotionOff: vrinput::SetMotionControls(false); break;
         case kHeadOn: fpcam::SetHideHead(true); break;
         case kHeadOff: fpcam::SetHideHead(false); break;
+        case kYellowOn: stereo::SetYellowFilter(true); break;
+        case kYellowOff: stereo::SetYellowFilter(false); break;
         case kTurnSmooth: fpcam::SetSnapTurn(false); break;
         case kTurnSnap: fpcam::SetSnapTurn(true); break;
         case kStepDown:
@@ -213,7 +216,7 @@ void Text(const wchar_t* s, RECT r, HFONT f, COLORREF c, UINT fmt) {
 }
 
 void AddButton(int x, int y, int w, int h, Action a, const wchar_t* text, bool selected, bool enabled) {
-    if (g_nButtons < 24) g_buttons[g_nButtons++] = {{x, y, x + w, y + h}, a, text, selected, enabled};
+    if (g_nButtons < 32) g_buttons[g_nButtons++] = {{x, y, x + w, y + h}, a, text, selected, enabled};
 }
 
 // A row: a label, then two choices or "- value +". GOW_STYLE_NINE_ROW_V6 order (zero-based index -> y).
@@ -253,13 +256,15 @@ int Rows(Row* r) {
     const int m = stereo::Method();
     r[n++] = {L"Rendering method", kNative, kAfr, L"Native", L"AFR", false, 0, true, true, kMono, L"Mono",
               m == stereo::kNative ? 0 : m == stereo::kAfr ? 1 : m == stereo::kMono ? 2 : -1};
+    // 1.5 (owner 2026-11-24): the game's yellow colour filter (its per-channel gamma; Off = the "No PP" mod's colours), live
+    r[n++] = {L"Yellow filter", kYellowOn, kYellowOff, L"On", L"Off", stereo::YellowFilter(), 0, true, true};
     r[n++] = {L"VR on / off  (Crashing during cutscene)", kVrOn, kVrOff, L"On", L"Off", true, 0, true, true};
     return n;
 }
 
 void Layout(wchar_t* stepText, wchar_t* sizeText, wchar_t* pushText) {
     g_nButtons = 0;
-    Row rows[12];
+    Row rows[16];
     const int n = Rows(rows);
     for (int i = 0; i < n; ++i) {
         const Row& r = rows[i];
@@ -308,7 +313,7 @@ void Draw() {
     std::memcpy(g_bits, g_bgPix, sizeof(g_bgPix));
     Fill({0, 0, kW, 100}, title);
     Text(L"VR SETTINGS", {40, 0, kW - 40, 100}, g_fTitle, white, DT_LEFT | DT_VCENTER);
-    Row rows[12];
+    Row rows[16];
     const int n = Rows(rows);
     for (int i = 0; i < n; ++i) {
         const int y = kTop + i * kRow;
@@ -447,10 +452,10 @@ bool Update(const xr::FrameInput& in, const pose::Vec3& screen, float screenW, F
     uint32_t ew = 0, eh = 0;
     stereo::EyeImageSize(&ew, &eh);
     char state[128];
-    sprintf_s(state, "%d %d %d %d %.2f %.0f %d %u %u %d %u %d %.2f %d", int(fpcam::GameplayFP()), int(fpcam::CutsceneFP()),
+    sprintf_s(state, "%d %d %d %d %.2f %.0f %d %u %u %d %u %d %.2f %d %d", int(fpcam::GameplayFP()), int(fpcam::CutsceneFP()),
               int(vrinput::MotionControls()), int(fpcam::SnapTurn()), fpcam::TurnSpeed(), fpcam::SnapDegrees(),
               vrinput::PadType(), ew, eh, rendersize::Setting(), rendersize::AutoSize(), stereo::Method(),
-              stereo::CameraPush(), int(fpcam::HideHead()));
+              stereo::CameraPush(), int(fpcam::HideHead()), int(stereo::YellowFilter()));
     if (hover != g_hover || std::strcmp(state, g_lastState) != 0 || g_needDraw) {
         g_hover = hover;
         strcpy_s(g_lastState, state);

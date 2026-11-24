@@ -16,6 +16,7 @@ Play **Heavy Rain (PC)** in VR. Every frame is drawn in true 3D for each eye wit
 - **VR settings:** pause the game or open the game's Options menu, and a panel appears on the right. Point a controller and pull its trigger.
 - **Menus:** tap all **four face buttons** for the pause screen (with the VR settings panel).
 - **Xbox or PlayStation (PS VR2) controls**, with matching button icons in the game (VR settings panel). With PlayStation controls, the moves the game asks you to make with the controller are read from your right VR controller.
+- **Yellow filter:** turn the game's yellow colour tint on (the default) or off in the VR settings panel, at any time.
 - **Rumble.** The game's controller vibration plays on your VR controllers.
 - **3D audio:** sounds follow your head.
 
@@ -27,6 +28,7 @@ Play **Heavy Rain (PC)** in VR. Every frame is drawn in true 3D for each eye wit
 - **Finger detection.** Rest your fingers on the controller and the character's fingers follow: lift your index finger to point, squeeze for a fist; the thumb closes with your grip.
 - **Your body follows your headset:** lean or take a step and the body moves with you, so your hands always reach.
 - **Prompts in front of you:** action prompts, hold and mash prompts, tutorial texts, thoughts and dialogue choices appear in front of you instead of around the character.
+- **Jayden's ARI glasses by hand:** with motion controls, squeeze the grip at your chest and bring your hand to your eyes to put them on, or squeeze at your face and lower it to take them off. The open glasses are in your hand while you hold them (read from your own copy of the game). A hint shows the move once per chapter.
 - **In the VR settings panel:** smooth or snap turning (and its speed / angle); motion controls on or off (off: the controllers work like a gamepad); hide head on or off (on, the default: the character's head, hair, eyes and teeth are not drawn in first person).
 
 ## Install
@@ -59,6 +61,7 @@ Open an issue on the mod's GitHub page (**Issues** → **New issue**) with a few
 |---|---|
 | **The game crashed** | The newest **`crash_<date>.txt`** from **`hrvr_logs\crash_reports`** in your game folder |
 | **Something looks or works wrong, the game froze, or VR did not start** | **`hrvr_logs\hrvr.log`** from your game folder, right after quitting the game (if you have started the game again since, send **`hrvr.prev.log`** too) |
+| **Text shows on your monitor but not in the headset** | Press **F12** while it shows, then send **`hrvr_logs\hrvr.log`** and the six **`hrvr_diag_*.bmp`** pictures from your game folder |
 | **The install or uninstall window showed an error** | A screenshot of that window |
 
 The mod writes these files itself while the game runs (`hrvr.log` is started fresh each time; the run before is kept as `hrvr.prev.log`).

@@ -21,6 +21,7 @@
 #include "fpbody.h"
 #include "fpcam.h"
 #include "game.h"
+#include "gamma_filter.h"
 #include "harness.h"
 #include "hotkeys.h"
 #include "log.h"
@@ -104,6 +105,11 @@ bool g_vrDof = false;
 // NOISE"): the camera's noise switch (+0x144, read by the same post-effect fill as DoF) is cleared for the eye passes like DoF;
 // since 1.4 also for every other render (HookBuild: the desktop window and flat screens, owner). vr_film_grain=on keeps the game's grain.
 bool g_vrGrain = false;
+// vr_yellow_filter=on (default, owner 2026-11-24): the game's per-channel colour gamma (the "yellow filter", gamma_filter.h)
+// as the game sets it; off = 1 / 1 / 1 as the 3DMigoto "No PP" mod gets it. Live from the VR panel (any thread); applied
+// in HookBuild on the game thread.
+std::atomic<bool> g_yellowFilter{true};
+gamma::GammaFilter g_gammaFilter;
 
 std::wstring IniPath() {
     wchar_t exe[MAX_PATH];
@@ -803,6 +809,18 @@ void LogLightGather() {
         static_cast<unsigned long long>(g_closeUpAlreadySet.exchange(0)));
 }
 
+// 1.5: the yellow filter (gamma_filter.h) per camera Build - every render of the frame (headset, desktop window, flat
+// screens) and the videos / menus that read the same three floats. Build runs on the game thread, as the scripts that
+// call SetGammaCorrection and the post pass that reads it.
+void ApplyYellowFilter() {
+    float* ch[3] = {Global<float>(g::GammaR), Global<float>(g::GammaG), Global<float>(g::GammaB)};
+    if (!ch[0] || !ch[1] || !ch[2]) return;
+    const bool on = g_yellowFilter.load(std::memory_order_relaxed);
+    if (g_gammaFilter.Apply(ch, on))
+        Log("STEREO yellow filter %s: colour gamma R %.3f G %.3f B %.3f (vr_yellow_filter=%s)",
+            on ? "on (the game's)" : "off (No PP: neutral)", *ch[0], *ch[1], *ch[2], on ? "on" : "off");
+}
+
 // ---- hooks ----
 void HookBuild(void* cam, float aspect, float guardX, float guardY) {
     ++g_count.build;
@@ -821,6 +839,7 @@ void HookBuild(void* cam, float aspect, float guardX, float guardY) {
             }
         }
     }
+    ApplyYellowFilter();
     const int eye = g_eye;
     const bool stereo = eye >= 0 && IsStereoCam(cam);
     if (eye >= 0 && !stereo && g_smallHead && IsSmallCam(cam)) {
@@ -889,10 +908,63 @@ void HookBuild(void* cam, float aspect, float guardX, float guardY) {
     }
 }
 
+// 1.5 diagnostic (a player: the internal monologue's subtitle on the desktop window, never in the headset): where every
+// 2D layer of a frame goes. Read-only: counts, a 10 s line, and each call of the diagnostic-shot frames.
+struct Layer2DCensus {
+    std::atomic<uint64_t> deferred{0}, otherVpInPass{0}, windowUi{0}, windowAfter{0}, other{0};
+    void* otherVps[4] = {};
+    int nOther = 0;
+};
+Layer2DCensus g_l2d;
+int g_layerTrace = 0;      // Presents left whose 2D layer calls are logged one by one
+uint64_t g_diagFrame = 0;  // the Present that asked for a diagnostic shot (saved from the next one)
+void CensusLayer(void* layer, void* vp, uint64_t flag, bool mainVp, bool deferred) {
+    const char* where;
+    if (deferred) {
+        ++g_l2d.deferred;
+        where = "main viewport, held back for the UI capture";
+    } else if (g_pass && vp) {
+        ++g_l2d.otherVpInPass;
+        where = "another viewport, drawn INSIDE the eye render (in the eye images)";
+        bool known = false;
+        for (int i = 0; i < g_l2d.nOther; ++i) known |= g_l2d.otherVps[i] == vp;
+        if (!known && g_l2d.nOther < 4) {
+            g_l2d.otherVps[g_l2d.nOther++] = vp;
+            Log("STEREO 2D layer of another viewport %p (layer %p, flag %llu) drawn inside the eye render", vp, layer,
+                static_cast<unsigned long long>(flag));
+        }
+    } else if (!vp && g_pendingUiSlot >= 0) {
+        ++g_l2d.windowUi;
+        where = "the window's own 2D layer, inside the UI capture";
+    } else if (!vp && !g_pass) {
+        ++g_l2d.windowAfter;
+        where = g_uiPanel ? "the window's own 2D layer, OUTSIDE the UI capture (desktop only)"
+                          : "the window's own 2D layer after the eye renders (ui=eyes: desktop only)";
+    } else {
+        ++g_l2d.other;
+        where = mainVp ? "main viewport outside the eye renders" : "a viewport outside the eye renders";
+    }
+    if (g_layerTrace > 0)
+        Log("STEREO diag 2D layer %p vp %p flag %llu: %s", layer, vp, static_cast<unsigned long long>(flag), where);
+    static uint64_t last = 0;
+    const uint64_t now = GetTickCount64();
+    if (now - last >= 10000) {
+        last = now;
+        Log("STEREO 2D layers 10 s: main viewport held back %llu, another viewport inside the eye render %llu, window "
+            "layer in the UI capture %llu, window layer outside it (desktop only) %llu, other %llu (ui=%s)",
+            static_cast<unsigned long long>(g_l2d.deferred.exchange(0)),
+            static_cast<unsigned long long>(g_l2d.otherVpInPass.exchange(0)),
+            static_cast<unsigned long long>(g_l2d.windowUi.exchange(0)),
+            static_cast<unsigned long long>(g_l2d.windowAfter.exchange(0)),
+            static_cast<unsigned long long>(g_l2d.other.exchange(0)), g_uiPanel ? "panel" : "eyes");
+    }
+}
+
 void HookLayer(void* layer, void* vp, uint64_t flag, void* a4) {
     ++g_count.layer;
     bool mainVp = false;
     for (int k = 0; k < g_mainVpCount; ++k) mainVp |= g_mainVps[k] == vp;
+    if (xr::Running()) CensusLayer(layer, vp, flag, mainVp, g_pass && mainVp && (g_uiPanel || g_stage == Stage::Gate));
     if (g_pass && mainVp && (g_uiPanel || g_stage == Stage::Gate)) {
         // UI of the main view: held back during the eye passes, drawn once over transparent black
         // afterwards. Secondary viewports keep their 2D inside their own pass.
@@ -1676,6 +1748,11 @@ void PollCommands() {
             g_drawStats = DrawStats{};
             Log("STEREO prime %s (camera setup run before each eye pass)", g_prime ? "on" : "off");
             done += c + "\n";
+        } else if (c == "diagshot") {
+            xr::RequestDiagShot();
+            g_diagFrame = g_frame;
+            g_layerTrace = 3;
+            done += c + "\n";
         } else if (c == "observe") {
             if (g_camCount) LogModel("CMD camera", g_cams[0]);
             done += "observe\n";
@@ -1749,6 +1826,12 @@ void HookPresent(void* a1, uint64_t sync, void* a3, void* a4) {
                 g_xrWanted = !g_xrWanted.load();
                 Log("XR %s requested (F9)", g_xrWanted ? "on" : "off");
             }
+            static hotkeys::Edge f12;
+            if (f12.Feed(VK_F12)) {  // owner: just F12 (Steam's screenshot key too - both fire)
+                xr::RequestDiagShot();
+                g_diagFrame = g_frame;
+                g_layerTrace = 3;
+            }
             if (f10.Feed(VK_F10)) vrinput::SetPadType(2);
             if (f11.Feed(VK_F11)) vrinput::SetPadType(5);
             if (g_stage == Stage::Vr) {
@@ -1782,6 +1865,9 @@ void HookPresent(void* a1, uint64_t sync, void* a3, void* a4) {
             summary::Tick(xr::Running(), g_lastStereoMs && GetTickCount64() - g_lastStereoMs < 300);
             // The desktop window's picture, the very last step (08.4): every headset copy is made; the square 3D view
             // cropped to fill the 16:9 window, flat screens kept whole.
+            if (g_layerTrace > 0) --g_layerTrace;
+            if (g_ctx && xr::Running() && xr::DiagShotPending() && g_frame > g_diagFrame)
+                if (ID3D11Texture2D* bb = PresentImage()) xr::DiagShotAtPresent(g_ctx, bb, g_eyeTex[0]);
             int cw = 0, ch = 0;
             bool crop = false;
             if (g_stage == Stage::Vr && g_ctx && xr::Running() && rendersize::DesktopPicture(&cw, &ch, &crop))
@@ -1827,6 +1913,7 @@ bool Install() {
     xr::SetMono(g_method == kMono);
     g_vrDof = IniOn(L"vr_dof", false);
     g_vrGrain = IniOn(L"vr_film_grain", false);
+    g_yellowFilter = IniOn(L"vr_yellow_filter", true);
     const float scale = float(_wtof(IniString(L"world_scale", L"1.0").c_str()));
     g_worldScale = scale > 0.001f && scale < 1000.f ? scale : 1.f;
     xr::SetSymmetricFov(IniOn(L"symfov", true));
@@ -1906,6 +1993,13 @@ void SetCameraPush(float metres) {
     swprintf_s(v, L"%.2f", metres);
     WritePrivateProfileStringW(L"hrvr", L"camera_forward", v, IniPath().c_str());
     Log("STEREO third-person camera closer -> %.2f m (saved to hrvr.ini camera_forward)", metres);
+}
+
+bool YellowFilter() { return g_yellowFilter.load(); }
+void SetYellowFilter(bool on) {
+    g_yellowFilter = on;
+    WritePrivateProfileStringW(L"hrvr", L"vr_yellow_filter", on ? L"on" : L"off", IniPath().c_str());
+    Log("STEREO yellow filter -> %s (VR panel; saved to hrvr.ini vr_yellow_filter)", on ? "on" : "off");
 }
 
 void RequestVr(bool on) {

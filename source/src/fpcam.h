@@ -32,6 +32,11 @@ bool Command(const char* verb, const char* arg);
 
 // Settings for the VR settings panel; every setter saves to hrvr.ini at once.
 bool GameplayFP();
+// 1.6: the gameplay first-person view (F1) was drawn within the last 250 ms (ari.cpp: the glasses gesture only there).
+bool F1ViewNow();
+// 1.7: the drawn hand's controller offsets (fp_wrist_pitch radians, fp_wrist_back metres) - the ARI glasses copy uses the
+// same ones so it sits where the drawn hand holds it.
+void WristOffsets(float* pitchRad, float* backM);
 void SetGameplayFP(bool on);
 bool CutsceneFP();
 void SetCutsceneFP(bool on);

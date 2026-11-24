@@ -142,6 +142,13 @@ bool GetInteractionProfile(int hand, char* output, uint32_t capacity);
 void RequestUiShot();
 // Game thread, right before ResizeBuffers (render thread idle): drop the backbuffer view.
 void ReleaseBackbufferViews();
+// 1.5 diagnostic (a player: "internal monologue shows in the desktop window and never in the headset"): F12 or
+// hrvr_cmd.txt `diagshot` - the next UI frame saves the UI capture (hrvr_diag_ui) and the left eye (hrvr_diag_eye0), the
+// Present after it the desktop picture (hrvr_diag_desktop), each as _rgb.bmp + _alpha.bmp in the game folder.
+void RequestDiagShot();
+// Present, before the desktop fit: finishes a requested diagnostic shot (eye0 = the left eye image).
+void DiagShotAtPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* backbuffer, ID3D11Texture2D* eye0);
+bool DiagShotPending();
 void RequestFlatShot();  // next 2D-only frame: save the panel source and the backdrop eye image
 void SetUiTestPattern(int mode);
 // UI panel alpha: 3 (default) brightness coverage, drops black overlays such as cutscene

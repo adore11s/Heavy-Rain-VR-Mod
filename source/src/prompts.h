@@ -32,6 +32,12 @@ void SetMparGui(void* gui);
 bool Showing();
 // GetTickCount64 of the last frame with prompts on offer (0: never).
 uint64_t LastShownMs();
+// 1.6.2: a prompt on offer needs this stick (0 left, 1 right) - from its element type / accepted inputs, within 250 ms.
+// Button prompts (R1, X ...) and the ARI glasses prompt answered by the hand never count.
+bool StickPromptShowing(int stick);
+// 1.7.1: may the right stick (x, y) turn the first-person view now? Only the side a prompt on offer could take is held
+// back, and beside right-stick prompts a turn must be a sideways push (turn_gate.h); no prompt: always.
+bool TurnAllowed(float x, float y);
 // GetTickCount64 of the last frame the game drew any prompt record (movie QTEs too - hold / mash / loop - which the
 // MPAR_GUI lists may not count); 0: never.
 uint64_t LastElementMs();

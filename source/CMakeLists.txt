@@ -36,6 +36,9 @@ add_library(hrvr_common OBJECT
     src/panel.cpp
     src/welcome_draw.cpp
     src/welcome.cpp
+    src/ari_draw.cpp
+    src/ari_copy_draw.cpp
+    src/ari.cpp
     src/menus.cpp
     src/story.cpp
     src/summary.cpp
@@ -173,6 +176,40 @@ add_executable(help_menu_tests tests/help_menu_tests.cpp)
 target_compile_options(help_menu_tests PRIVATE /W4 /permissive-)
 add_test(NAME help_menu_tests COMMAND help_menu_tests)
 
+add_executable(gamma_filter_tests tests/gamma_filter_tests.cpp)
+target_include_directories(gamma_filter_tests PRIVATE src)
+target_compile_options(gamma_filter_tests PRIVATE /W4 /permissive-)
+add_test(NAME gamma_filter_tests COMMAND gamma_filter_tests)
+
+add_executable(ari_gesture_tests tests/ari_gesture_tests.cpp)
+target_include_directories(ari_gesture_tests PRIVATE src)
+target_compile_options(ari_gesture_tests PRIVATE /W4 /permissive-)
+add_test(NAME ari_gesture_tests COMMAND ari_gesture_tests)
+
+add_executable(ari_copy_tests tests/ari_copy_tests.cpp)
+target_include_directories(ari_copy_tests PRIVATE src)
+target_compile_options(ari_copy_tests PRIVATE /W4 /permissive-)
+add_test(NAME ari_copy_tests COMMAND ari_copy_tests)
+add_executable(ari_mesh_load_tests tests/ari_mesh_load_tests.cpp)
+target_include_directories(ari_mesh_load_tests PRIVATE src)
+target_compile_options(ari_mesh_load_tests PRIVATE /W4 /permissive-)
+add_test(NAME ari_mesh_load_tests COMMAND ari_mesh_load_tests)
+
+add_executable(f3_comfort_tests tests/f3_comfort_tests.cpp)
+target_include_directories(f3_comfort_tests PRIVATE src)
+target_compile_options(f3_comfort_tests PRIVATE /W4 /permissive-)
+add_test(NAME f3_comfort_tests COMMAND f3_comfort_tests)
+
+add_executable(turn_gate_tests tests/turn_gate_tests.cpp)
+target_include_directories(turn_gate_tests PRIVATE src)
+target_compile_options(turn_gate_tests PRIVATE /W4 /permissive-)
+add_test(NAME turn_gate_tests COMMAND turn_gate_tests)
+
+add_executable(prompt_place_tests tests/prompt_place_tests.cpp)
+target_include_directories(prompt_place_tests PRIVATE src)
+target_compile_options(prompt_place_tests PRIVATE /W4 /permissive-)
+add_test(NAME prompt_place_tests COMMAND prompt_place_tests)
+
 add_executable(fpbody_tests tests/fpbody_tests.cpp)
 target_include_directories(fpbody_tests PRIVATE src)
 target_compile_options(fpbody_tests PRIVATE /W4 /permissive-)
@@ -210,12 +247,25 @@ add_executable(panel_preview tests/panel_preview.cpp src/panel.cpp "${HRVR_FONTS
 target_compile_definitions(panel_preview PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(panel_preview PRIVATE gdi32)
 
+# Not a test: the ARI glasses copy drawn by the mod's own renderer on WARP (tools/ari_copy.py ->
+# docs/items/ari_copy/ARI_COPY_HEADSET.png). Built only on request: --target ari_copy_preview.
+add_executable(ari_copy_preview EXCLUDE_FROM_ALL tests/ari_copy_preview.cpp src/ari_copy_draw.cpp)
+target_include_directories(ari_copy_preview PRIVATE src)
+target_compile_definitions(ari_copy_preview PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_link_libraries(ari_copy_preview PRIVATE d3d11 d3dcompiler)
+
 # Not a test: every welcome window (playbook 11.4) drawn by the mod's own src/welcome_draw.cpp, saved as BMPs
 # (tools/welcome_pictures.py -> docs/welcome/*.png). Built only on request: --target welcome_preview.
 add_executable(welcome_preview EXCLUDE_FROM_ALL tests/welcome_preview.cpp src/welcome_draw.cpp "${HRVR_FONTS_RC}")
 target_include_directories(welcome_preview PRIVATE src)
 target_compile_definitions(welcome_preview PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(welcome_preview PRIVATE d2d1 dwrite windowscodecs)
+
+# Not a test: the two ARI glasses hint pictures (1.6) from src/ari_draw.cpp -> docs/ari/*.png. On request only.
+add_executable(ari_hint_preview EXCLUDE_FROM_ALL tests/ari_hint_preview.cpp src/ari_draw.cpp "${HRVR_FONTS_RC}")
+target_include_directories(ari_hint_preview PRIVATE src)
+target_compile_definitions(ari_hint_preview PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_link_libraries(ari_hint_preview PRIVATE d2d1 dwrite windowscodecs)
 
 add_executable(harness_tests tests/harness_tests.cpp)
 target_include_directories(harness_tests PRIVATE src)

@@ -30,6 +30,11 @@
 #include "swap_format.h"
 #include "videowatch.h"
 #include "welcome.h"
+#include "ari.h"
+#include "ari_copy.h"
+#include "ari_copy_draw.h"
+#include "ari_draw.h"
+#include "fpcam.h"
 #include "welcome_draw.h"
 #include "xr_geometry.h"
 #include "xr_recenter.h"
@@ -84,6 +89,9 @@ EyeSwapchain g_quad;  // flat UI / 2D screen panel
 EyeSwapchain g_panelSc, g_cursorSc;  // VR settings panel (panel.h) and its pointer dot
 EyeSwapchain g_tpSc;                 // developer tools overlay (devtools.h); never created in the release build
 EyeSwapchain g_welSc;                // first-start welcome windows (welcome.h), 1200 x 820 premultiplied
+EyeSwapchain g_ariSc;                // 1.6: the first-time ARI glasses hint (ari_draw.h), 640 x 480 premultiplied
+int g_ariFilled = -1;                // the hint picture in g_ariSc (-1 none; reset with the session)
+ID3D11Texture2D* g_ariTex = nullptr;
 bool g_tpFilled = false;             // its image holds content (reset with the session)
 bool g_welFilled = false;            // the welcome swapchain holds the current window (reset with the session)
 uint64_t g_tpVersion = 0;            // devtools::Overlay::version of the uploaded image
@@ -895,6 +903,33 @@ void KeepEyeCopy(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* src, uint32
     Blit(ctx, src, top, height, g_keptRtv[eye], w, h, 0, false, false, 0.f, 0.f, &crop);
     g_keptTexSerial[eye] = g_keptSerial[eye];
 }
+// 1.7 (owner: "i always want to see the open glasses whenever im taking them out or on or off ... a seperate copy"):
+// while the ARI gesture holds the glasses (ari::GlassesHand, F1 + motion controls), the mod's own open copy of them
+// (ari_copy.h; pictures docs/items/ari_copy) in that controller hand, drawn into this eye's image with the pose and
+// frustum the image is submitted with. The grip is the packet's own sample (same display time as the views).
+std::atomic<uint64_t> g_ariCopyFrames{0};
+void DrawAriCopy(ID3D11DeviceContext* ctx, const Packet& p, int eye, ID3D11RenderTargetView* rtv, uint32_t w, uint32_t h) {
+    int kind = 0;
+    const int hand = ari::GlassesHand(&kind);
+    if (hand < 0 || hand > 1 || kind == 0) return;
+    const HandInput& hi = p.input.hand[hand];
+    if (!hi.active || !hi.gripValid) return;
+    float pitch = 0.f, back = 0.07f;
+    fpcam::WristOffsets(&pitch, &back);
+    Mat4 copyRel;
+    if (!aricopy::CopyWorld(hi.gripRel, pitch, back, kind == 1 /* Kind::On */, hand == 0, &copyRel)) return;
+    const Mat4 copy = Mul(copyRel, FromPose(p.refPose.orientation, p.refPose.position));
+    const XrFovf& f = p.ownFov[eye];
+    if (aricopy::DrawCopy(ctx, rtv, w, h, FromPose(p.views[eye].pose.orientation, p.views[eye].pose.position),
+                          std::tan(f.angleLeft), std::tan(f.angleRight), std::tan(f.angleUp), std::tan(f.angleDown), copy) &&
+        eye == 0) {
+        const uint64_t n = g_ariCopyFrames.fetch_add(1, std::memory_order_relaxed);
+        if (n == 0 || n % 900 == 0)
+            Log("ARI copy: glasses in the %s hand (%s), %llu frame(s) drawn so far", hand ? "right" : "left",
+                kind == 1 ? "put on" : "take off", static_cast<unsigned long long>(n + 1));
+    }
+}
+
 // Draws the stale eye's kept picture into its swapchain turned into this packet's pose and frustum. True when done:
 // the eye is then submitted with the packet's pose (both views one moment, on any runtime).
 bool WarpStaleEye(ID3D11DeviceContext* ctx, Packet& p, int eye) {
@@ -951,6 +986,7 @@ bool WarpStaleEye(ID3D11DeviceContext* ctx, Packet& p, int eye) {
         if (previous) previous->Release();
         ctx1->Release();
     }
+    if (drawn) DrawAriCopy(ctx, p, eye, s.rtvs[idx], s.width, s.height);  // 1.7: turned to this packet's pose too
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     xrReleaseSwapchainImage(s.handle, &ri);
     if (drawn && g_afrWarps.fetch_add(1, std::memory_order_relaxed) == 0)
@@ -1264,20 +1300,21 @@ bool Start(ID3D11Device* device) {
         vcv[0].recommendedImageRectWidth, vcv[0].recommendedImageRectHeight);
 
     g_linearizeInShader = false;  // set below per the format and the views (a new session may get another format)
-    for (int e = 0; e < 7; ++e) {
+    for (int e = 0; e < 8; ++e) {
         if (e == 5 && !devtools::Available()) continue;  // no overlay swapchain in the release build
-        EyeSwapchain& s = e < 2 ? g_eyes[e] : e == 2 ? g_quad : e == 3 ? g_panelSc : e == 4 ? g_cursorSc : e == 5 ? g_tpSc : g_welSc;
+        EyeSwapchain& s = e < 2 ? g_eyes[e] : e == 2 ? g_quad : e == 3 ? g_panelSc : e == 4 ? g_cursorSc : e == 5 ? g_tpSc : e == 6 ? g_welSc : g_ariSc;
         XrSwapchainCreateInfo sc{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sc.format = format;
         sc.sampleCount = 1;
-        const int32_t sizes[7][2] = {{int32_t(vcv[0].recommendedImageRectWidth), int32_t(vcv[0].recommendedImageRectHeight)},
+        const int32_t sizes[8][2] = {{int32_t(vcv[0].recommendedImageRectWidth), int32_t(vcv[0].recommendedImageRectHeight)},
                                      {int32_t(vcv[1].recommendedImageRectWidth), int32_t(vcv[1].recommendedImageRectHeight)},
                                      {1920, 1080},
                                      {panel::kWidthPx, panel::kHeightPx},
                                      {panel::kCursorPx, panel::kCursorPx},
                                      {devtools::kOverlayWidthPx, devtools::kOverlayHeightPx},
-                                     {welcome::kWW, welcome::kWH}};
+                                     {welcome::kWW, welcome::kWH},
+                                     {ari::kHW, ari::kHH}};
         sc.width = s.width = sizes[e][0];
         sc.height = s.height = sizes[e][1];
         sc.faceCount = sc.arraySize = sc.mipCount = 1;
@@ -1306,6 +1343,7 @@ bool Start(ID3D11Device* device) {
         }
     }
     g_panelFilled = g_cursorFilled = g_tpFilled = g_welFilled = false;
+    g_ariFilled = -1;
     Log("XR swapchains ready (%zu images, linearize=%d)", g_eyes[0].images.size(), int(g_linearizeInShader));
     if (!CreateBlitResources()) return false;
     g_started = true;
@@ -1329,7 +1367,8 @@ void Shutdown(const char* why) {
     g_beginPending = false;
     for (auto& p : g_packets) p.valid = false;
     g_panelFilled = g_cursorFilled = g_tpFilled = g_welFilled = false;
-    for (EyeSwapchain* s : {&g_eyes[0], &g_eyes[1], &g_quad, &g_panelSc, &g_cursorSc, &g_tpSc, &g_welSc}) {
+    g_ariFilled = -1;
+    for (EyeSwapchain* s : {&g_eyes[0], &g_eyes[1], &g_quad, &g_panelSc, &g_cursorSc, &g_tpSc, &g_welSc, &g_ariSc}) {
         for (auto* rtv : s->rtvs)
             if (rtv) rtv->Release();
         s->rtvs.clear();
@@ -1425,6 +1464,7 @@ void ReleaseBackbufferViews() {
     g_bbForRtv = nullptr;
 }
 std::atomic<bool> g_flatShotRequest{false};
+std::atomic<int> g_diagShot{0};  // 1 requested, 2 UI + eye saved (desktop at the next Present)
 void RequestFlatShot() { g_flatShotRequest = true; }
 void SetUiTestPattern(int mode) { g_uiTestPattern = mode; }
 void SetUiAlphaMode(int mode) { g_uiAlphaMode = mode == 2 ? 2 : 3; }
@@ -1637,6 +1677,7 @@ void EndFrameWithLayers(ID3D11DeviceContext* ctx, Packet& p, const XrComposition
                         const XrCompositionLayerQuad* extra = nullptr);
 int PanelLayers(ID3D11DeviceContext* ctx, const FrameInput& in, const XrPosef& ref, XrCompositionLayerQuad out[2]);
 int WelcomeLayers(ID3D11DeviceContext* ctx, const FrameInput& in, const XrPosef& ref, bool flat, XrCompositionLayerQuad out[2]);
+bool AriLayer(ID3D11DeviceContext* ctx, const XrPosef& ref, XrCompositionLayerQuad* out);
 bool TeleportLayer(ID3D11DeviceContext* ctx, const XrPosef& ref, XrCompositionLayerQuad* out);
 
 namespace {
@@ -1783,6 +1824,7 @@ void EyeImpl(int eye, Packet& p, ID3D11DeviceContext* ctx, ID3D11Texture2D* src,
                 // 06.3a: in AFR the next frame turns this picture for the eye's stale turn
                 if (p.afr && g_afrReproject.load(std::memory_order_relaxed))
                     KeepEyeCopy(ctx, eye, src, srcTop, srcHeight, crop, s.width, s.height);
+                DrawAriCopy(ctx, p, eye, s.rtvs[idx], s.width, s.height);  // 1.7: the glasses copy, after the kept copy
             }
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             xrReleaseSwapchainImage(s.handle, &ri);
@@ -1901,7 +1943,7 @@ void EndFrameWithLayers(ID3D11DeviceContext* ctx, Packet& p, const XrComposition
         layer.views = pv;
         // Projection (unless a full-screen video hides the scene), the UI screen, an extra quad, then the
         // VR settings panel and its pointer while the game is paused.
-        const XrCompositionLayerBaseHeader* layers[9] = {};
+        const XrCompositionLayerBaseHeader* layers[10] = {};
         uint32_t layerN = 0;
         const bool panelOnly = sceneHidden && quad;
         if (!panelOnly) layers[layerN++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer);
@@ -1914,6 +1956,11 @@ void EndFrameWithLayers(ID3D11DeviceContext* ctx, Packet& p, const XrComposition
         XrCompositionLayerQuad wel[2];
         const int wels = p.shouldRender && ctx ? WelcomeLayers(ctx, p.input, p.refPose, sceneHidden || panels > 0, wel) : 0;
         for (int i = 0; i < wels; ++i) layers[layerN++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&wel[i]);
+        // 1.6: the ARI glasses gesture (every 3D frame) and its first-time hint, over the 3D scene only
+        ari::Frame(p.input);
+        XrCompositionLayerQuad ariHint;
+        if (ctx && p.shouldRender && !sceneHidden && panels == 0 && wels == 0 && AriLayer(ctx, p.refPose, &ariHint))
+            layers[layerN++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ariHint);
         XrCompositionLayerQuad tp;  // developer tools overlay (F7 menu), on top
         if (ctx && p.shouldRender && TeleportLayer(ctx, p.refPose, &tp))
             layers[layerN++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&tp);
@@ -2197,6 +2244,11 @@ void OnUiEnd(int slot, ID3D11DeviceContext* ctx, ID3D11Texture2D* backbuffer, ID
         CopyWithMips(ctx, g_uiTex, backbuffer);
         g_uiAspect = float(d.Width) / float(std::max<UINT>(d.Height, 1));
         if (g_uiShotRequest.exchange(false)) SaveRgba(ctx, g_uiTex, "hrvr_uicap");
+        if (g_diagShot.load() == 1) {
+            SaveRgba(ctx, g_uiTex, "hrvr_diag_ui");
+            if (eyeImage) SaveRgba(ctx, eyeImage, "hrvr_diag_eye0");
+            g_diagShot = 2;
+        }
         video = UpdateVideoMode(ctx, g_uiTex);
         // FAIL-HUD-010 discriminator: an opaque, known image on the quad proves the layer path
         // independently of the capture.
@@ -2260,6 +2312,13 @@ XrPosef RefToLocal(const XrPosef& ref, const pose::Vec3& p, float yaw) {
     out.position = {ref.position.x + p.x * c + p.z * s, ref.position.y + p.y, ref.position.z - p.x * s + p.z * c};
     return out;
 }
+// As RefToLocal, then tilted about the quad's own X axis by `pitch` (negative = the top leans away from the viewer).
+XrPosef RefToLocalTilted(const XrPosef& ref, const pose::Vec3& p, float yaw, float pitch) {
+    XrPosef out = RefToLocal(ref, p, yaw);
+    const float sy = out.orientation.y, cy = out.orientation.w, sx = std::sin(0.5f * pitch), cx = std::cos(0.5f * pitch);
+    out.orientation = {cy * sx, sy * cx, -sy * sx, cy * cx};  // q_yaw * q_x(pitch)
+    return out;
+}
 
 // ---- developer tools overlay (devtools.h): an opaque quad where the head looked when it opened ----
 ID3D11Texture2D* g_tpTex = nullptr;
@@ -2289,6 +2348,21 @@ bool TeleportLayer(ID3D11DeviceContext* ctx, const XrPosef& ref, XrCompositionLa
 
 // ---- the desktop window's picture (playbook 08.4) ----
 ID3D11Texture2D* g_fitTex = nullptr;  // a copy of the backbuffer, drawn back into it
+
+void RequestDiagShot() {
+    g_diagShot = 1;
+    Log("XR diagnostic shot requested: UI capture, left eye and desktop of the next frame");
+}
+bool DiagShotPending() { return g_diagShot.load() != 0; }
+void DiagShotAtPresent(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, ID3D11Texture2D* eye0) {
+    const int st = g_diagShot.load();
+    if (!st || !ctx || !bb || !g_device) return;
+    if (st == 1 && eye0) SaveRgba(ctx, eye0, "hrvr_diag_eye0");  // no UI frame this time (ui=eyes or a 2D screen)
+    SaveRgba(ctx, bb, "hrvr_diag_desktop");
+    g_diagShot = 0;
+    Log("XR diagnostic shot saved: hrvr_diag_desktop%s (_rgb / _alpha.bmp in the game folder)",
+        st == 2 ? " + hrvr_diag_ui + hrvr_diag_eye0" : st == 1 && eye0 ? " + hrvr_diag_eye0 (no UI frame: ui=eyes or a 2D screen)" : "");
+}
 
 void DesktopFit(ID3D11DeviceContext* ctx, ID3D11Texture2D* bb, int clientW, int clientH, bool crop3D) {
     if (!ctx || !bb || !g_device || !CreateBlitResources()) return;
@@ -2370,6 +2444,25 @@ int WelcomeLayers(ID3D11DeviceContext* ctx, const FrameInput& in, const XrPosef&
         }
     }
     return n;
+}
+
+// 1.6: the ARI glasses hint (ari.h): one premultiplied quad, its picture uploaded when it changes.
+bool AriLayer(ID3D11DeviceContext* ctx, const XrPosef& ref, XrCompositionLayerQuad* out) {
+    ari::HintQuad h;
+    if (!g_ariSc.handle || !ari::HintLayer(&h) || !h.pixels) return false;
+    if (g_ariFilled != h.picture) {
+        if (!UploadQuadImage(ctx, g_ariSc, g_ariTex, h.pixels, ari::kHW, ari::kHH, 1)) return false;
+        g_ariFilled = h.picture;
+    }
+    *out = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    out->layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // premultiplied, transparent around
+    out->space = g_local;
+    out->eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    out->subImage.swapchain = g_ariSc.handle;
+    out->subImage.imageRect = {{0, 0}, {g_ariSc.width, g_ariSc.height}};
+    out->pose = RefToLocalTilted(ref, h.center, h.yaw, h.pitch);
+    out->size = {h.widthM, h.heightM};
+    return true;
 }
 
 // The panel quad and, while a controller points at it, the pointer dot; 0 layers when the game is not paused.

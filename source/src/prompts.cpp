@@ -1,5 +1,7 @@
 #include "prompts.h"
 
+#include "ari.h"
+
 #include <windows.h>
 
 #include <MinHook.h>
@@ -15,6 +17,8 @@
 #include "game.h"
 #include "help_menu.h"
 #include "log.h"
+#include "prompt_place.h"
+#include "turn_gate.h"
 
 namespace hrvr::prompts {
 namespace {
@@ -121,6 +125,9 @@ uint64_t g_mparLockMs = 0;
 pose::Vec3 g_mparPoint{};
 std::atomic<uint64_t> g_mparMoved{0}, g_mparKept{0};
 std::atomic<bool> g_allFront{true};  // fp_prompts_front=all (default) | player
+std::mutex g_placeMutex;
+promptplace::Memory g_place;  // 1.6.6: each 3D prompt's place, decided once (prompt_place.h)
+using promptplace::Place;
 
 bool InBodyColumn(pose::Vec3 head, pose::Vec3 p) {
     const float dx = p.x - head.x, dz = p.z - head.z, dy = p.y - head.y;
@@ -197,8 +204,89 @@ bool FaceEye(const float* m, pose::Vec3 at, pose::Vec3 eye, float* out) {
     return true;
 }
 
+// 1.6.2 (owner: "when wearing the glasses there is a R1 prompt at all times and i cant turn"): which stick a prompt needs
+// (bit 0 left, bit 1 right), from its element type (game.h vt) - first-person turning / walking pause only for those.
+std::atomic<uint64_t> g_stickPromptMs[2] = {0, 0};
+uint8_t StickMask(void* element) {
+    if (!element) return 0;
+    if (obj::HasVtable(element, game::vt::MparAxisRotation)) {
+        int stick = 1;
+        obj::Get(element, 0x220, stick);
+        return stick == 0 ? 1 : stick == 1 ? 2 : 0;
+    }
+    if (obj::HasVtable(element, game::vt::MparAxisTranslation)) {
+        int mode = -1;
+        obj::Get(element, 0x228, mode);
+        return mode == 0 || mode == 1 ? 1 : mode == 2 || mode == 3 || mode == 6 ? 2 : 0;
+    }
+    if (obj::HasVtable(element, game::vt::MparAxisDiagonal)) return 3;  // not decoded: both
+    // button types: the input ids they accept (vfunc +0x320 = 0x140374b40)
+    uint8_t mask = 0;
+    void* list = obj::Cached(obj::Ptr(element, 0x88));
+    uint32_t n = 0;
+    const uint8_t* ids = list ? static_cast<const uint8_t*>(obj::Ptr(list, 0x50)) : nullptr;
+    if (!ids || !obj::Get(list, 0x48, n) || n > 64) return 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        int id = 0;
+        if (!obj::Get(ids, size_t(i) * 12, id)) break;
+        if (id >= 100 && id <= 103) mask |= 1;
+        if ((id >= 0x68 && id <= 0x6B) || id == 0x101 || id == 0x102) mask |= 2;
+    }
+    return mask;
+}
+
+// 1.7.1 (owner: "when im in f1 and get near a prompt of any kind, it disables my rotations"): which turns a prompt could
+// take (turn_gate.h, from the element's own fields - decompiled, see there); per gate bit the last time a prompt on
+// offer had it.
+std::atomic<uint64_t> g_turnGateMs[3] = {0, 0, 0};  // block left, block right, sideways pushes only
+uint8_t TurnGateOf(void* element) {
+    if (!element) return 0;
+    if (obj::HasVtable(element, game::vt::MparAxisRotation)) {
+        int stick = 1, dir = 0;
+        float start = 0.f;
+        obj::Get(element, 0x220, stick);
+        obj::Get(element, 0x224, dir);
+        obj::Get(element, 0x228, start);
+        return turngate::ForRotation(stick, start, dir);
+    }
+    if (obj::HasVtable(element, game::vt::MparAxisTranslation)) {
+        int mode = -1;
+        float from = 0.f, to = 0.f;
+        obj::Get(element, 0x228, mode);
+        obj::Get(element, 0x22C, from);
+        obj::Get(element, 0x230, to);
+        return turngate::ForTranslation(mode, from, to);
+    }
+    if (obj::HasVtable(element, game::vt::MparAxisDiagonal)) return turngate::kDiagonal;
+    uint8_t g = 0;
+    void* list = obj::Cached(obj::Ptr(element, 0x88));
+    uint32_t n = 0;
+    const uint8_t* ids = list ? static_cast<const uint8_t*>(obj::Ptr(list, 0x50)) : nullptr;
+    if (!ids || !obj::Get(list, 0x48, n) || n > 64) return 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        int id = 0;
+        if (!obj::Get(ids, size_t(i) * 12, id)) break;
+        g = uint8_t(g | turngate::ForButtonInput(id));
+    }
+    return g;
+}
+
 void HookMparUpdate(void* owner, void* record) {
     g_origMparUpdate(owner, record);
+    if (record && ari::HidePrompt(record)) {  // 1.6: a glasses prompt answered by the hand (F1 + motion controls)
+        g_lastElement = GetTickCount64();
+        return;
+    }
+    if (record) {
+        void* element = obj::Ptr(record, 0x08);
+        const uint8_t mask = StickMask(element);
+        const uint64_t t = GetTickCount64();
+        for (int k = 0; k < 2; ++k)
+            if (mask >> k & 1) g_stickPromptMs[k] = t;
+        const uint8_t gate = TurnGateOf(element);
+        for (int k = 0; k < 3; ++k)
+            if (gate >> k & 1) g_turnGateMs[k] = t;
+    }
     // STATIC 2026-10-29: every prompt record the game draws passes here - the list 0x1415ba070 holds one per active
     // USER_ACTION (added by 0x14023d180 -> 0x14023dc20 on activation, removed by USER_ACTION vfunc 0x140239c90 ->
     // 0x14023cec0), and movie QTEs (MOVIE_USER_ACTION_CONDITION 0x1402c7b70 -> 0x14022cfa0 -> 0x14023d180) are
@@ -276,9 +364,18 @@ void HookMparUpdate(void* owner, void* record) {
         }
         return;
     }
+    // 1.6.6: the place is decided per prompt (prompt_place.h), not per frame - a walking hand-anchored prompt no longer
+    // takes the "on the player" and "on an object" places by turns
+    promptplace::Place place;
+    {
+        std::lock_guard lock(g_placeMutex);
+        const void* key = obj::Ptr(record, 0x08);
+        place = *g_place.Update(key ? key : record, now, onPlayer);
+    }
+    const bool stayOnPlayer = place.onPlayer;
     float out[16];
     pose::Vec3 to = at;
-    const bool bring = onPlayer || g_allFront.load(std::memory_order_relaxed);
+    const bool bring = stayOnPlayer || g_allFront.load(std::memory_order_relaxed);
     if (bring) {
         pose::Vec3 point;
         float frontYaw;
@@ -291,17 +388,27 @@ void HookMparUpdate(void* owner, void* record) {
             point = g_mparPoint;
             frontYaw = g_front.yaw;
         }
-        if (onPlayer) {
+        if (stayOnPlayer) {
             // Keep the prompts' arrangement round the head, gathered at the front point - compressed into the view
             // (0.14.0, owner: "the pressing and holding prompts or smash prompt repeatedly not in front of me"; log:
             // hold / mash prompts sit up to 1.25 m from the head, round the body down to the hands, and 0.13 carried
             // that whole offset to the front point - half a metre low, or off to the side). Only the sideways part
             // (across the view) and the height are kept, scaled down and limited, so every one stays in front.
+            // 1.6.6: taken once, when the prompt first shows on the player, then kept (one place).
             const float lx = -std::cos(frontYaw), lz = std::sin(frontYaw);  // the front direction's left
-            const float dx = at.x - v.head.x, dz = at.z - v.head.z;
-            const float side = std::clamp((dx * lx + dz * lz) * 0.6f, -0.22f, 0.22f);
-            const float up = std::clamp((at.y - v.head.y) * 0.25f, -0.14f, 0.1f);
-            to = {point.x + lx * side, point.y + up, point.z + lz * side};
+            if (!place.haveOffset) {
+                const float dx = at.x - v.head.x, dz = at.z - v.head.z;
+                place.side = std::clamp((dx * lx + dz * lz) * 0.6f, -0.22f, 0.22f);
+                place.up = std::clamp((at.y - v.head.y) * 0.25f, -0.14f, 0.1f);
+                place.haveOffset = true;
+                std::lock_guard lock(g_placeMutex);
+                const void* key = obj::Ptr(record, 0x08);
+                Place* p = g_place.Update(key ? key : record, now, true);
+                p->side = place.side;
+                p->up = place.up;
+                p->haveOffset = true;
+            }
+            to = {point.x + lx * place.side, point.y + place.up, point.z + lz * place.side};
         } else {
             // 0.12.0 (owner: "not all button prompts, like swiping the joystick down or up, show in front of me"): the
             // prompts on objects come to the front point too, keeping their direction as a small offset - an object
@@ -322,7 +429,7 @@ void HookMparUpdate(void* owner, void* record) {
     out[13] = to.y;
     out[14] = to.z;
     if (!WriteMatrix(display, out)) return;
-    if (!onPlayer) {
+    if (!stayOnPlayer) {
         g_mparKept.fetch_add(1, std::memory_order_relaxed);
         static uint64_t lastObj = 0;
         if (bring && now - lastObj >= 5000) {
@@ -568,5 +675,36 @@ bool Showing() {
 
 uint64_t LastShownMs() { return g_lastShown; }
 uint64_t LastElementMs() { return g_lastElement; }
+bool TurnAllowed(float x, float y) {
+    const uint64_t now = GetTickCount64();
+    uint8_t gates = 0;
+    for (int k = 0; k < 3; ++k) {
+        const uint64_t t = g_turnGateMs[k].load(std::memory_order_relaxed);
+        if (t && now - t < 250) gates = uint8_t(gates | (1u << k));
+    }
+    static uint8_t logged = 0;
+    if (gates != logged) {
+        logged = gates;
+        if (!gates)
+            Log("PROMPTS turning: no prompt on offer takes the right stick - turning as usual");
+        else
+            Log("PROMPTS turning beside a prompt: left %s, right %s%s", gates & turngate::kBlockLeft ? "goes to the prompt" : "turns",
+                gates & turngate::kBlockRight ? "goes to the prompt" : "turns",
+                gates & turngate::kSideways ? " (a turn is a sideways push; up / down / arcs are the prompt's)" : "");
+    }
+    return turngate::TurnAllowed(gates, x, y);
+}
+
+bool StickPromptShowing(int stick) {
+    const uint64_t t = g_stickPromptMs[stick & 1].load(std::memory_order_relaxed);
+    const bool on = t && GetTickCount64() - t < 250;
+    static bool logged[2] = {false, false};
+    if (on != logged[stick & 1]) {
+        logged[stick & 1] = on;
+        Log("PROMPTS a prompt on offer needs the %s stick: %s", (stick & 1) ? "right" : "left",
+            on ? "yes (first-person turning / walking paused for it)" : "no");
+    }
+    return on;
+}
 
 }  // namespace hrvr::prompts

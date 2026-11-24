@@ -76,6 +76,11 @@ enum class Anchor {
     // 1.2 (STATIC 2026-11-22): the 3D-placed MenusMaster menus' draw in the viewport pass (rcx = display component:
     // +0x60 entries of 0x18 = menu-data handle, param block; +0x68 count). Param block +7 = 3D, +0x30 world matrix.
     IhmMenusDisplay,
+    // 1.6 (STATIC 2026-11-24, docs/ARI_GESTURE.md): a USER_ACTION's activation (rcx UA, rdx entry: +0x18 handle ->
+    // its MPAR element; UA +0x3C0 / +0x3C4 = the movie its condition starts, +0x3C8 that movie's name), and the
+    // semicircle element's per-frame check (vtable +0x2A8, rcx element: reads +0x234..+0x240; 0 / 1 fail / 2 success).
+    UserActionActivate,
+    AxisRotationCheck,
     Count
 };
 
@@ -87,6 +92,12 @@ constexpr uint64_t CameraTargetAlias = 0x140d60d80;    // +0x18 name, +0x30 enti
 constexpr uint64_t ThoughtsGui = 0x140d50ac8;          // +0xB0 character handle, +0xE0 bone name, +0x180 animator
 constexpr uint64_t MokitSync = 0x140d52c38;            // pair walk: +0x110 entity, +0x128 EntitySync (handles)
 constexpr uint64_t MparGui = 0x140d5f800;              // singleton; +0x20 / +0x38 counts of user actions offered
+constexpr uint64_t MparAxisRotation = 0x140d21868;     // 1.6: the semicircle prompt element (docs/ARI_GESTURE.md)
+// 1.6.2 (STATIC: input filters vfunc +0x320): AXIS_TRANSLATION +0x228 mode 0/1 = left stick (ids 100..103), 2/3/6 =
+// right stick (0x68..0x6B, 0x101/0x102), 4/5 triggers, 7..12 motion; AXIS_ROTATION +0x220 0 left / 1 right;
+// STANDARD / HOLD / MASH / LOOP accept the ids in their input list (+0x88 handle -> +0x48 count, +0x50 array, 12 bytes).
+constexpr uint64_t MparAxisTranslation = 0x140d207f0;
+constexpr uint64_t MparAxisDiagonal = 0x140d210a8;
 }  // namespace vt
 
 // Recorded globals (resolved through sigdb Data entries).
@@ -114,6 +125,14 @@ constexpr uint64_t KeepCloseUpLists = 0x141a1aeef;
 // int (0.36.15, STATIC): the configured display mode - 0 exclusive full screen, 1 borderless screen-sized window,
 // 2 window with a title bar (setter 0x140a6b420); ScreenMode from user_setting.ini, 1 when there is no file.
 constexpr uint64_t ConfigScreenMode = 0x141a2e108;
+// float x3 (1.5, STATIC 2026-11-24): the colour pass's per-channel gamma = the game's "yellow filter". .data defaults
+// R 0.982 / G 1.02 / B 1.13 (blue darkened most -> yellow); written only by Lua SetGammaCorrection(r, g, b)
+// (display_1402783c0). The post pass 0x140a7d670 uploads (menu brightness * -0.01 + each) to cbuffer c8 "Gamma" of the
+// final SIMPLE_FRAGMENT shader: oColor.rgb = pow(oColor.rgb, Gamma.rgb). Video shader 0x140960aa0 and the menus
+// (MM_DISPLAY, their mean) read them too. The 3DMigoto "No PP" mod removes that pow from the shaders.
+constexpr uint64_t GammaR = 0x1417a6138;
+constexpr uint64_t GammaG = 0x1417a6108;
+constexpr uint64_t GammaB = 0x1417a611c;
 }  // namespace g
 
 bool ResolveAll(const char* textSha256, bool log);

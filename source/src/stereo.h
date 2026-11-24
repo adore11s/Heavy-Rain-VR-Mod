@@ -23,6 +23,10 @@ void RequestVr(bool on);
 // camera_forward, saved.
 float CameraPush();
 void SetCameraPush(float metres);
+// 1.5 (owner 2026-11-24): the game's "yellow filter" (its per-channel colour gamma, gamma_filter.h) on = as the game sets
+// it (default), off = neutral as the 3DMigoto "No PP" mod; live, every render; hrvr.ini vr_yellow_filter, saved.
+bool YellowFilter();
+void SetYellowFilter(bool on);
 // The size of each eye's image (the render size: square with a VR picture size), false before the first pair.
 bool EyeImageSize(uint32_t* width, uint32_t* height);
 // Rendering method (stereo.cpp): Native, AFR (one eye per frame), AER (one eye per frame, both eyes of a pair

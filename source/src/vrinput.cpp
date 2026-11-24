@@ -11,6 +11,8 @@
 // ISteamController answers for a synthetic handle; real pads pass through untouched.
 #include "vrinput.h"
 
+#include "ari.h"
+
 #include "panel.h"
 
 #include <windows.h>
@@ -726,6 +728,9 @@ LegacyState Snapshot() {
         out.rightTrigger = 0.f;
         out.buttons &= ~kRightTriggerButton;
     }
+    // 1.6.3: a grip pressed for the ARI glasses gesture (ari.h) is not the game's L1 / R1
+    for (int h = 0; h < 2; ++h)
+        if (ari::TakesGrip(h)) out.buttons &= ~(h == 0 ? (kLeftGrip | kLeftSqueeze) : (kRightGrip | kRightSqueeze));
     return out;
 }
 void SetPadType(int type) {
